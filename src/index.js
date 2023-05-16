@@ -30,6 +30,15 @@ export * from './utils/GeometryPreparationUtils.js';
 export * from './utils/BlurredEnvMapGenerator.js';
 export * from './utils/IESLoader.js';
 
+// shader
+export * from './shader/rand/pcg.glsl.js';
+export * from './shader/rand/sobol.glsl.js';
+export * from './shader/common/arraySamplerTexelFetch.glsl.js';
+export * from './shader/common/fresnel.glsl.js';
+export * from './shader/common/utils.glsl.js';
+export * from './shader/common/math.glsl.js';
+
+
 // materials
 export * from './materials/fullscreen/DenoiseMaterial.js';
 export * from './materials/fullscreen/GradientMapMaterial.js';

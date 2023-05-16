@@ -3836,6 +3836,270 @@
 
 	}
 
+	const pcgGLSL = /* glsl */`
+
+	// https://www.shadertoy.com/view/wltcRS
+	uvec4 WHITE_NOISE_SEED;
+
+	void rng_initialize( vec2 p, int frame ) {
+
+		// white noise seed
+		WHITE_NOISE_SEED = uvec4( p, uint( frame ), uint( p.x ) + uint( p.y ) );
+
+	}
+
+	// https://www.pcg-random.org/
+	void pcg4d( inout uvec4 v ) {
+
+		v = v * 1664525u + 1013904223u;
+		v.x += v.y * v.w;
+		v.y += v.z * v.x;
+		v.z += v.x * v.y;
+		v.w += v.y * v.z;
+		v = v ^ ( v >> 16u );
+		v.x += v.y*v.w;
+		v.y += v.z*v.x;
+		v.z += v.x*v.y;
+		v.w += v.y*v.z;
+
+	}
+
+	// returns [ 0, 1 ]
+	float rand() {
+
+		pcg4d( WHITE_NOISE_SEED );
+		return float( WHITE_NOISE_SEED.x ) / float( 0xffffffffu );
+
+	}
+
+	vec2 rand2() {
+
+		pcg4d( WHITE_NOISE_SEED );
+		return vec2( WHITE_NOISE_SEED.xy ) / float(0xffffffffu);
+
+	}
+
+	vec3 rand3() {
+
+		pcg4d( WHITE_NOISE_SEED );
+		return vec3( WHITE_NOISE_SEED.xyz ) / float( 0xffffffffu );
+
+	}
+
+	vec4 rand4() {
+
+		pcg4d( WHITE_NOISE_SEED );
+		return vec4( WHITE_NOISE_SEED ) / float( 0xffffffffu );
+
+	}
+`;
+
+	const arraySamplerTexelFetchGLSL = /*glsl */`
+
+	// add texel fetch functions for texture arrays
+	vec4 texelFetch1D( sampler2DArray tex, int layer, uint index ) {
+
+		uint width = uint( textureSize( tex, 0 ).x );
+		uvec2 uv;
+		uv.x = index % width;
+		uv.y = index / width;
+
+		return texelFetch( tex, ivec3( uv, layer ), 0 );
+
+	}
+
+	vec4 textureSampleBarycoord( sampler2DArray tex, int layer, vec3 barycoord, uvec3 faceIndices ) {
+
+		return
+			barycoord.x * texelFetch1D( tex, layer, faceIndices.x ) +
+			barycoord.y * texelFetch1D( tex, layer, faceIndices.y ) +
+			barycoord.z * texelFetch1D( tex, layer, faceIndices.z );
+
+	}
+
+`;
+
+	const fresnelGLSL = /* glsl */`
+
+	bool totalInternalReflection( float cosTheta, float eta ) {
+
+		float sinTheta = sqrt( 1.0 - cosTheta * cosTheta );
+		return eta * sinTheta > 1.0;
+
+	}
+
+	// https://google.github.io/filament/Filament.md.html#materialsystem/diffusebrdf
+	float schlickFresnel( float cosine, float f0 ) {
+
+		return f0 + ( 1.0 - f0 ) * pow( 1.0 - cosine, 5.0 );
+
+	}
+
+	vec3 schlickFresnel( float cosine, vec3 f0 ) {
+
+		return f0 + ( 1.0 - f0 ) * pow( 1.0 - cosine, 5.0 );
+
+	}
+
+	vec3 schlickFresnel( float cosine, vec3 f0, vec3 f90 ) {
+
+		return f0 + ( f90 - f0 ) * pow( 1.0 - cosine, 5.0 );
+
+	}
+
+	float dielectricFresnel( float cosThetaI, float eta ) {
+
+		// https://schuttejoe.github.io/post/disneybsdf/
+		float ni = eta;
+		float nt = 1.0;
+
+		// Check for total internal reflection
+		float sinThetaISq = 1.0f - cosThetaI * cosThetaI;
+		float sinThetaTSq = eta * eta * sinThetaISq;
+		if( sinThetaTSq >= 1.0 ) {
+
+			return 1.0;
+
+		}
+
+		float sinThetaT = sqrt( sinThetaTSq );
+
+		float cosThetaT = sqrt( max( 0.0, 1.0f - sinThetaT * sinThetaT ) );
+		float rParallel = ( ( nt * cosThetaI ) - ( ni * cosThetaT ) ) / ( ( nt * cosThetaI ) + ( ni * cosThetaT ) );
+		float rPerpendicular = ( ( ni * cosThetaI ) - ( nt * cosThetaT ) ) / ( ( ni * cosThetaI ) + ( nt * cosThetaT ) );
+		return ( rParallel * rParallel + rPerpendicular * rPerpendicular ) / 2.0;
+
+	}
+
+	// https://raytracing.github.io/books/RayTracingInOneWeekend.html#dielectrics/schlickapproximation
+	float iorRatioToF0( float eta ) {
+
+		return pow( ( 1.0 - eta ) / ( 1.0 + eta ), 2.0 );
+
+	}
+
+	vec3 evaluateFresnel( float cosTheta, float eta, vec3 f0, vec3 f90 ) {
+
+		if ( totalInternalReflection( cosTheta, eta ) ) {
+
+			return f90;
+
+		}
+
+		return schlickFresnel( cosTheta, f0, f90 );
+
+	}
+
+	float evaluateFresnelWeight( float cosTheta, float eta, float f0 ) {
+
+		if ( totalInternalReflection( cosTheta, eta ) ) {
+
+			return 1.0;
+
+		}
+
+		return schlickFresnel( cosTheta, f0 );
+
+	}
+
+	/*
+	// https://schuttejoe.github.io/post/disneybsdf/
+	float disneyFresnel( vec3 wo, vec3 wi, vec3 wh, float f0, float eta, float metalness ) {
+
+		float dotHV = dot( wo, wh );
+		float dotHL = dot( wi, wh );
+
+		float dielectricFresnel = dielectricFresnel( abs( dotHV ), eta );
+		float metallicFresnel = schlickFresnel( dotHL, f0 );
+
+		return mix( dielectricFresnel, metallicFresnel, metalness );
+
+	}
+	*/
+`;
+
+	const mathGLSL = /* glsl */`
+
+	// Fast arccos approximation used to remove banding artifacts caused by numerical errors in acos.
+	// This is a cubic Lagrange interpolating polynomial for x = [-1, -1/2, 0, 1/2, 1].
+	// For more information see: https://github.com/gkjohnson/three-gpu-pathtracer/pull/171#issuecomment-1152275248
+	float acosApprox( float x ) {
+
+		x = clamp( x, -1.0, 1.0 );
+		return ( - 0.69813170079773212 * x * x - 0.87266462599716477 ) * x + 1.5707963267948966;
+
+	}
+
+	// An acos with input values bound to the range [-1, 1].
+	float acosSafe( float x ) {
+
+		return acos( clamp( x, -1.0, 1.0 ) );
+
+	}
+
+	float saturateCos( float val ) {
+
+		return clamp( val, 0.001, 1.0 );
+
+	}
+
+	float square( float t ) {
+
+		return t * t;
+
+	}
+
+	vec2 square( vec2 t ) {
+
+		return t * t;
+
+	}
+
+	vec3 square( vec3 t ) {
+
+		return t * t;
+
+	}
+
+	vec4 square( vec4 t ) {
+
+		return t * t;
+
+	}
+
+	vec2 rotateVector( vec2 v, float t ) {
+
+		float ac = cos( t );
+		float as = sin( t );
+		return vec2(
+			v.x * ac - v.y * as,
+			v.x * as + v.y * ac
+		);
+
+	}
+
+	// forms a basis with the normal vector as Z
+	mat3 getBasisFromNormal( vec3 normal ) {
+
+		vec3 other;
+		if ( abs( normal.x ) > 0.5 ) {
+
+			other = vec3( 0.0, 1.0, 0.0 );
+
+		} else {
+
+			other = vec3( 1.0, 0.0, 0.0 );
+
+		}
+
+		vec3 ortho = normalize( cross( normal, other ) );
+		vec3 ortho2 = normalize( cross( normal, ortho ) );
+		return mat3( ortho2, ortho, normal );
+
+	}
+
+`;
+
 	class DenoiseMaterial extends MaterialBase {
 
 		constructor( parameters ) {
@@ -5969,270 +6233,6 @@ bool bvhIntersectFogVolumeHit(
 
 `;
 
-	const mathGLSL = /* glsl */`
-
-	// Fast arccos approximation used to remove banding artifacts caused by numerical errors in acos.
-	// This is a cubic Lagrange interpolating polynomial for x = [-1, -1/2, 0, 1/2, 1].
-	// For more information see: https://github.com/gkjohnson/three-gpu-pathtracer/pull/171#issuecomment-1152275248
-	float acosApprox( float x ) {
-
-		x = clamp( x, -1.0, 1.0 );
-		return ( - 0.69813170079773212 * x * x - 0.87266462599716477 ) * x + 1.5707963267948966;
-
-	}
-
-	// An acos with input values bound to the range [-1, 1].
-	float acosSafe( float x ) {
-
-		return acos( clamp( x, -1.0, 1.0 ) );
-
-	}
-
-	float saturateCos( float val ) {
-
-		return clamp( val, 0.001, 1.0 );
-
-	}
-
-	float square( float t ) {
-
-		return t * t;
-
-	}
-
-	vec2 square( vec2 t ) {
-
-		return t * t;
-
-	}
-
-	vec3 square( vec3 t ) {
-
-		return t * t;
-
-	}
-
-	vec4 square( vec4 t ) {
-
-		return t * t;
-
-	}
-
-	vec2 rotateVector( vec2 v, float t ) {
-
-		float ac = cos( t );
-		float as = sin( t );
-		return vec2(
-			v.x * ac - v.y * as,
-			v.x * as + v.y * ac
-		);
-
-	}
-
-	// forms a basis with the normal vector as Z
-	mat3 getBasisFromNormal( vec3 normal ) {
-
-		vec3 other;
-		if ( abs( normal.x ) > 0.5 ) {
-
-			other = vec3( 0.0, 1.0, 0.0 );
-
-		} else {
-
-			other = vec3( 1.0, 0.0, 0.0 );
-
-		}
-
-		vec3 ortho = normalize( cross( normal, other ) );
-		vec3 ortho2 = normalize( cross( normal, ortho ) );
-		return mat3( ortho2, ortho, normal );
-
-	}
-
-`;
-
-	const fresnelGLSL = /* glsl */`
-
-	bool totalInternalReflection( float cosTheta, float eta ) {
-
-		float sinTheta = sqrt( 1.0 - cosTheta * cosTheta );
-		return eta * sinTheta > 1.0;
-
-	}
-
-	// https://google.github.io/filament/Filament.md.html#materialsystem/diffusebrdf
-	float schlickFresnel( float cosine, float f0 ) {
-
-		return f0 + ( 1.0 - f0 ) * pow( 1.0 - cosine, 5.0 );
-
-	}
-
-	vec3 schlickFresnel( float cosine, vec3 f0 ) {
-
-		return f0 + ( 1.0 - f0 ) * pow( 1.0 - cosine, 5.0 );
-
-	}
-
-	vec3 schlickFresnel( float cosine, vec3 f0, vec3 f90 ) {
-
-		return f0 + ( f90 - f0 ) * pow( 1.0 - cosine, 5.0 );
-
-	}
-
-	float dielectricFresnel( float cosThetaI, float eta ) {
-
-		// https://schuttejoe.github.io/post/disneybsdf/
-		float ni = eta;
-		float nt = 1.0;
-
-		// Check for total internal reflection
-		float sinThetaISq = 1.0f - cosThetaI * cosThetaI;
-		float sinThetaTSq = eta * eta * sinThetaISq;
-		if( sinThetaTSq >= 1.0 ) {
-
-			return 1.0;
-
-		}
-
-		float sinThetaT = sqrt( sinThetaTSq );
-
-		float cosThetaT = sqrt( max( 0.0, 1.0f - sinThetaT * sinThetaT ) );
-		float rParallel = ( ( nt * cosThetaI ) - ( ni * cosThetaT ) ) / ( ( nt * cosThetaI ) + ( ni * cosThetaT ) );
-		float rPerpendicular = ( ( ni * cosThetaI ) - ( nt * cosThetaT ) ) / ( ( ni * cosThetaI ) + ( nt * cosThetaT ) );
-		return ( rParallel * rParallel + rPerpendicular * rPerpendicular ) / 2.0;
-
-	}
-
-	// https://raytracing.github.io/books/RayTracingInOneWeekend.html#dielectrics/schlickapproximation
-	float iorRatioToF0( float eta ) {
-
-		return pow( ( 1.0 - eta ) / ( 1.0 + eta ), 2.0 );
-
-	}
-
-	vec3 evaluateFresnel( float cosTheta, float eta, vec3 f0, vec3 f90 ) {
-
-		if ( totalInternalReflection( cosTheta, eta ) ) {
-
-			return f90;
-
-		}
-
-		return schlickFresnel( cosTheta, f0, f90 );
-
-	}
-
-	float evaluateFresnelWeight( float cosTheta, float eta, float f0 ) {
-
-		if ( totalInternalReflection( cosTheta, eta ) ) {
-
-			return 1.0;
-
-		}
-
-		return schlickFresnel( cosTheta, f0 );
-
-	}
-
-	/*
-	// https://schuttejoe.github.io/post/disneybsdf/
-	float disneyFresnel( vec3 wo, vec3 wi, vec3 wh, float f0, float eta, float metalness ) {
-
-		float dotHV = dot( wo, wh );
-		float dotHL = dot( wi, wh );
-
-		float dielectricFresnel = dielectricFresnel( abs( dotHV ), eta );
-		float metallicFresnel = schlickFresnel( dotHL, f0 );
-
-		return mix( dielectricFresnel, metallicFresnel, metalness );
-
-	}
-	*/
-`;
-
-	const arraySamplerTexelFetchGLSL = /*glsl */`
-
-	// add texel fetch functions for texture arrays
-	vec4 texelFetch1D( sampler2DArray tex, int layer, uint index ) {
-
-		uint width = uint( textureSize( tex, 0 ).x );
-		uvec2 uv;
-		uv.x = index % width;
-		uv.y = index / width;
-
-		return texelFetch( tex, ivec3( uv, layer ), 0 );
-
-	}
-
-	vec4 textureSampleBarycoord( sampler2DArray tex, int layer, vec3 barycoord, uvec3 faceIndices ) {
-
-		return
-			barycoord.x * texelFetch1D( tex, layer, faceIndices.x ) +
-			barycoord.y * texelFetch1D( tex, layer, faceIndices.y ) +
-			barycoord.z * texelFetch1D( tex, layer, faceIndices.z );
-
-	}
-
-`;
-
-	const pcgGLSL = /* glsl */`
-
-	// https://www.shadertoy.com/view/wltcRS
-	uvec4 WHITE_NOISE_SEED;
-
-	void rng_initialize( vec2 p, int frame ) {
-
-		// white noise seed
-		WHITE_NOISE_SEED = uvec4( p, uint( frame ), uint( p.x ) + uint( p.y ) );
-
-	}
-
-	// https://www.pcg-random.org/
-	void pcg4d( inout uvec4 v ) {
-
-		v = v * 1664525u + 1013904223u;
-		v.x += v.y * v.w;
-		v.y += v.z * v.x;
-		v.z += v.x * v.y;
-		v.w += v.y * v.z;
-		v = v ^ ( v >> 16u );
-		v.x += v.y*v.w;
-		v.y += v.z*v.x;
-		v.z += v.x*v.y;
-		v.w += v.y*v.z;
-
-	}
-
-	// returns [ 0, 1 ]
-	float rand() {
-
-		pcg4d( WHITE_NOISE_SEED );
-		return float( WHITE_NOISE_SEED.x ) / float( 0xffffffffu );
-
-	}
-
-	vec2 rand2() {
-
-		pcg4d( WHITE_NOISE_SEED );
-		return vec2( WHITE_NOISE_SEED.xy ) / float(0xffffffffu);
-
-	}
-
-	vec3 rand3() {
-
-		pcg4d( WHITE_NOISE_SEED );
-		return vec3( WHITE_NOISE_SEED.xyz ) / float( 0xffffffffu );
-
-	}
-
-	vec4 rand4() {
-
-		pcg4d( WHITE_NOISE_SEED );
-		return vec4( WHITE_NOISE_SEED ) / float( 0xffffffffu );
-
-	}
-`;
-
 	const renderStructsGLSL = /* glsl */`
 
 	struct Ray {
@@ -7901,10 +7901,18 @@ bool bvhIntersectFogVolumeHit(
 	exports.QuiltPathTracingRenderer = QuiltPathTracingRenderer;
 	exports.RenderTarget2DArray = RenderTarget2DArray;
 	exports.ShapedAreaLight = ShapedAreaLight;
+	exports.arraySamplerTexelFetchGLSL = arraySamplerTexelFetchGLSL;
+	exports.fresnelGLSL = fresnelGLSL;
 	exports.getGroupMaterialIndicesAttribute = getGroupMaterialIndicesAttribute;
+	exports.mathGLSL = mathGLSL;
 	exports.mergeMeshes = mergeMeshes;
+	exports.pcgGLSL = pcgGLSL;
 	exports.setCommonAttributes = setCommonAttributes;
+	exports.sobolCommonGLSL = sobolCommonGLSL;
+	exports.sobolGenerationGLSL = sobolGenerationGLSL;
+	exports.sobolSamplingGLSL = sobolSamplingGLSL;
 	exports.trimToAttributes = trimToAttributes;
+	exports.utilsGLSL = utilsGLSL;
 
 	Object.defineProperty(exports, '__esModule', { value: true });
 
