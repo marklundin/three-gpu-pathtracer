@@ -4100,6 +4100,758 @@
 
 `;
 
+	const equirectSamplingGLSL = /* glsl */`
+
+	// samples the the given environment map in the given direction
+	vec3 sampleEquirectColor( sampler2D envMap, vec3 direction ) {
+
+		return texture2D( envMap, equirectDirectionToUv( direction ) ).rgb;
+
+	}
+
+	// gets the pdf of the given direction to sample
+	float equirectDirectionPdf( vec3 direction ) {
+
+		vec2 uv = equirectDirectionToUv( direction );
+		float theta = uv.y * PI;
+		float sinTheta = sin( theta );
+		if ( sinTheta == 0.0 ) {
+
+			return 0.0;
+
+		}
+
+		return 1.0 / ( 2.0 * PI * PI * sinTheta );
+
+	}
+
+	// samples the color given env map with CDF and returns the pdf of the direction
+	float sampleEquirect( EquirectHdrInfo info, vec3 direction, out vec3 color ) {
+
+		vec2 uv = equirectDirectionToUv( direction );
+		color = texture2D( info.map, uv ).rgb;
+
+		float totalSum = info.totalSum;
+		float lum = luminance( color );
+		ivec2 resolution = textureSize( info.map, 0 );
+		float pdf = lum / totalSum;
+
+		return float( resolution.x * resolution.y ) * pdf * equirectDirectionPdf( direction );
+
+	}
+
+	// samples a direction of the envmap with color and retrieves pdf
+	float sampleEquirectProbability( EquirectHdrInfo info, vec2 r, out vec3 color, out vec3 direction ) {
+
+		// sample env map cdf
+		float v = texture2D( info.marginalWeights, vec2( r.x, 0.0 ) ).x;
+		float u = texture2D( info.conditionalWeights, vec2( r.y, v ) ).x;
+		vec2 uv = vec2( u, v );
+
+		vec3 derivedDirection = equirectUvToDirection( uv );
+		direction = derivedDirection;
+		color = texture2D( info.map, uv ).rgb;
+
+		float totalSum = info.totalSum;
+		float lum = luminance( color );
+		ivec2 resolution = textureSize( info.map, 0 );
+		float pdf = lum / totalSum;
+
+		return float( resolution.x * resolution.y ) * pdf * equirectDirectionPdf( direction );
+
+	}
+
+`;
+
+	const lightSamplingGLSL = /* glsl */`
+
+	float getSpotAttenuation( const in float coneCosine, const in float penumbraCosine, const in float angleCosine ) {
+
+		return smoothstep( coneCosine, penumbraCosine, angleCosine );
+
+	}
+
+	float getDistanceAttenuation( const in float lightDistance, const in float cutoffDistance, const in float decayExponent ) {
+
+		// based upon Frostbite 3 Moving to Physically-based Rendering
+		// page 32, equation 26: E[window1]
+		// https://seblagarde.files.wordpress.com/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf
+		float distanceFalloff = 1.0 / max( pow( lightDistance, decayExponent ), EPSILON );
+
+		if ( cutoffDistance > 0.0 ) {
+
+			distanceFalloff *= pow2( saturate( 1.0 - pow4( lightDistance / cutoffDistance ) ) );
+
+		}
+
+		return distanceFalloff;
+
+	}
+
+	float getPhotometricAttenuation( sampler2DArray iesProfiles, int iesProfile, vec3 posToLight, vec3 lightDir, vec3 u, vec3 v ) {
+
+		float cosTheta = dot( posToLight, lightDir );
+		float angle = acos( cosTheta ) * ( 1.0 / PI );
+
+		return texture2D( iesProfiles, vec3( 0.0, angle, iesProfile ) ).r;
+
+	}
+
+	struct LightRecord {
+
+		float dist;
+		vec3 direction;
+		float pdf;
+		vec3 emission;
+		int type;
+
+	};
+
+	bool lightsClosestHit( sampler2D lights, uint lightCount, vec3 rayOrigin, vec3 rayDirection, out LightRecord lightRec ) {
+
+		bool didHit = false;
+		uint l;
+		for ( l = 0u; l < lightCount; l ++ ) {
+
+			Light light = readLightInfo( lights, l );
+
+			vec3 u = light.u;
+			vec3 v = light.v;
+
+			// check for backface
+			vec3 normal = normalize( cross( u, v ) );
+			if ( dot( normal, rayDirection ) < 0.0 ) {
+
+				continue;
+
+			}
+
+			u *= 1.0 / dot( u, u );
+			v *= 1.0 / dot( v, v );
+
+			float dist;
+
+			// MIS / light intersection is not supported for punctual lights.
+			if(
+				( light.type == RECT_AREA_LIGHT_TYPE && intersectsRectangle( light.position, normal, u, v, rayOrigin, rayDirection, dist ) ) ||
+				( light.type == CIRC_AREA_LIGHT_TYPE && intersectsCircle( light.position, normal, u, v, rayOrigin, rayDirection, dist ) )
+			) {
+
+				if ( ! didHit || dist < lightRec.dist ) {
+
+					float cosTheta = dot( rayDirection, normal );
+					didHit = true;
+					lightRec.dist = dist;
+					lightRec.pdf = ( dist * dist ) / ( light.area * cosTheta );
+					lightRec.emission = light.color * light.intensity;
+					lightRec.direction = rayDirection;
+					lightRec.type = light.type;
+
+				}
+
+			}
+
+		}
+
+		return didHit;
+
+	}
+
+	LightRecord randomAreaLightSample( Light light, vec3 rayOrigin, vec2 ruv ) {
+
+		LightRecord lightRec;
+		lightRec.type = light.type;
+
+		lightRec.emission = light.color * light.intensity;
+
+		vec3 randomPos;
+		if( light.type == RECT_AREA_LIGHT_TYPE ) {
+
+			// rectangular area light
+			randomPos = light.position + light.u * ( ruv.x - 0.5 ) + light.v * ( ruv.y - 0.5 );
+
+		} else if( light.type == CIRC_AREA_LIGHT_TYPE ) {
+
+			// circular area light
+			float r = 0.5 * sqrt( ruv.x );
+			float theta = ruv.y * 2.0 * PI;
+			float x = r * cos( theta );
+			float y = r * sin( theta );
+
+			randomPos = light.position + light.u * x + light.v * y;
+
+		}
+
+		vec3 toLight = randomPos - rayOrigin;
+		float lightDistSq = dot( toLight, toLight );
+		lightRec.dist = sqrt( lightDistSq );
+
+		vec3 direction = toLight / lightRec.dist;
+		lightRec.direction = direction;
+
+		vec3 lightNormal = normalize( cross( light.u, light.v ) );
+		lightRec.pdf = lightDistSq / ( light.area * dot( direction, lightNormal ) );
+
+		return lightRec;
+
+	}
+
+	LightRecord randomSpotLightSample( Light light, sampler2DArray iesProfiles, vec3 rayOrigin, vec2 ruv ) {
+
+		float radius = light.radius * sqrt( ruv.x );
+		float theta = ruv.y * 2.0 * PI;
+		float x = radius * cos( theta );
+		float y = radius * sin( theta );
+
+		vec3 u = light.u;
+		vec3 v = light.v;
+		vec3 normal = normalize( cross( u, v ) );
+
+		float angle = acos( light.coneCos );
+		float angleTan = tan( angle );
+		float startDistance = light.radius / max( angleTan, EPSILON );
+
+		vec3 randomPos = light.position - normal * startDistance + u * x + v * y;
+		vec3 toLight = randomPos - rayOrigin;
+		float lightDistSq = dot( toLight, toLight );
+		float dist = sqrt( lightDistSq );
+
+		vec3 direction = toLight / max( dist, EPSILON );
+		float cosTheta = dot( direction, normal );
+
+		float spotAttenuation = light.iesProfile != - 1 ?
+			getPhotometricAttenuation( iesProfiles, light.iesProfile, direction, normal, u, v ) :
+			getSpotAttenuation( light.coneCos, light.penumbraCos, cosTheta );
+
+		float distanceAttenuation = getDistanceAttenuation( dist, light.distance, light.decay );
+		LightRecord lightRec;
+		lightRec.type = light.type;
+		lightRec.dist = dist;
+		lightRec.direction = direction;
+		lightRec.emission = light.color * light.intensity * distanceAttenuation * spotAttenuation;
+		lightRec.pdf = 1.0;
+
+		return lightRec;
+
+	}
+
+	LightRecord randomLightSample( sampler2D lights, sampler2DArray iesProfiles, uint lightCount, vec3 rayOrigin, vec3 ruv ) {
+
+		// pick a random light
+		uint l = uint( ruv.x * float( lightCount ) );
+		Light light = readLightInfo( lights, l );
+
+		if ( light.type == SPOT_LIGHT_TYPE ) {
+
+			return randomSpotLightSample( light, iesProfiles, rayOrigin, ruv.yz );
+
+		} else if ( light.type == POINT_LIGHT_TYPE ) {
+
+			vec3 lightRay = light.u - rayOrigin;
+			float lightDist = length( lightRay );
+			float cutoffDistance = light.distance;
+			float distanceFalloff = 1.0 / max( pow( lightDist, light.decay ), 0.01 );
+			if ( cutoffDistance > 0.0 ) {
+
+				distanceFalloff *= pow2( saturate( 1.0 - pow4( lightDist / cutoffDistance ) ) );
+
+			}
+
+			LightRecord rec;
+			rec.direction = normalize( lightRay );
+			rec.dist = length( lightRay );
+			rec.pdf = 1.0;
+			rec.emission = light.color * light.intensity * distanceFalloff;
+			rec.type = light.type;
+			return rec;
+
+		} else if ( light.type == DIR_LIGHT_TYPE ) {
+
+			LightRecord rec;
+			rec.dist = 1e10;
+			rec.direction = light.u;
+			rec.pdf = 1.0;
+			rec.emission = light.color * light.intensity;
+			rec.type = light.type;
+
+			return rec;
+
+		} else {
+
+			// sample the light
+			return randomAreaLightSample( light, rayOrigin, ruv.yz );
+
+		}
+
+	}
+
+`;
+
+	const shapeSamplingGLSL = /* glsl */`
+
+	vec3 sampleHemisphere( vec3 n, vec2 uv ) {
+
+		// https://www.rorydriscoll.com/2009/01/07/better-sampling/
+		// https://graphics.pixar.com/library/OrthonormalB/paper.pdf
+		float sign = n.z == 0.0 ? 1.0 : sign( n.z );
+		float a = - 1.0 / ( sign + n.z );
+		float b = n.x * n.y * a;
+		vec3 b1 = vec3( 1.0 + sign * n.x * n.x * a, sign * b, - sign * n.x );
+		vec3 b2 = vec3( b, sign + n.y * n.y * a, - n.y );
+
+		float r = sqrt( uv.x );
+		float theta = 2.0 * PI * uv.y;
+		float x = r * cos( theta );
+		float y = r * sin( theta );
+		return x * b1 + y * b2 + sqrt( 1.0 - uv.x ) * n;
+
+	}
+
+	vec2 sampleTriangle( vec2 a, vec2 b, vec2 c, vec2 r ) {
+
+		// get the edges of the triangle and the diagonal across the
+		// center of the parallelogram
+		vec2 e1 = a - b;
+		vec2 e2 = c - b;
+		vec2 diag = normalize( e1 + e2 );
+
+		// pick the point in the parallelogram
+		if ( r.x + r.y > 1.0 ) {
+
+			r = vec2( 1.0 ) - r;
+
+		}
+
+		return e1 * r.x + e2 * r.y;
+
+	}
+
+	vec2 sampleCircle( vec2 uv ) {
+
+		float angle = 2.0 * PI * uv.x;
+		float radius = sqrt( uv.y );
+		return vec2( cos( angle ), sin( angle ) ) * radius;
+
+	}
+
+	vec3 sampleSphere( vec2 uv ) {
+
+		float u = ( uv.x - 0.5 ) * 2.0;
+		float t = uv.y * PI * 2.0;
+		float f = sqrt( 1.0 - u * u );
+
+		return vec3( f * cos( t ), f * sin( t ), u );
+
+	}
+
+	vec2 sampleRegularPolygon( int sides, vec3 uvw ) {
+
+		sides = max( sides, 3 );
+
+		vec3 r = uvw;
+		float anglePerSegment = 2.0 * PI / float( sides );
+		float segment = floor( float( sides ) * r.x );
+
+		float angle1 = anglePerSegment * segment;
+		float angle2 = angle1 + anglePerSegment;
+		vec2 a = vec2( sin( angle1 ), cos( angle1 ) );
+		vec2 b = vec2( 0.0, 0.0 );
+		vec2 c = vec2( sin( angle2 ), cos( angle2 ) );
+
+		return sampleTriangle( a, b, c, r.yz );
+
+	}
+
+	// samples an aperture shape with the given number of sides. 0 means circle
+	vec2 sampleAperture( int blades, vec3 uvw ) {
+
+		return blades == 0 ?
+			sampleCircle( uvw.xy ) :
+			sampleRegularPolygon( blades, uvw );
+
+	}
+
+
+`;
+
+	const cameraStructGLSL = /* glsl */`
+
+	struct PhysicalCamera {
+
+		float focusDistance;
+		float anamorphicRatio;
+		float bokehSize;
+		int apertureBlades;
+		float apertureRotation;
+
+	};
+
+`;
+
+	const equirectStructGLSL = /* glsl */`
+
+	struct EquirectHdrInfo {
+
+		sampler2D marginalWeights;
+		sampler2D conditionalWeights;
+		sampler2D map;
+
+		float totalSum;
+
+	};
+
+`;
+
+	const fogMaterialBvhGLSL = /* glsl */`
+
+#ifndef FOG_CHECK_ITERATIONS
+#define FOG_CHECK_ITERATIONS 30
+#endif
+
+// returns whether the given material is a fog material or not
+bool isMaterialFogVolume( sampler2D materials, uint materialIndex ) {
+
+	uint i = materialIndex * 45u;
+	vec4 s14 = texelFetch1D( materials, i + 14u );
+	return bool( int( s14.b ) & 4 );
+
+}
+
+// returns true if we're within the first fog volume we hit
+bool bvhIntersectFogVolumeHit(
+	BVH bvh, vec3 rayOrigin, vec3 rayDirection,
+	usampler2D materialIndexAttribute, sampler2D materials,
+	out Material material
+) {
+
+	material.fogVolume = false;
+
+	for ( int i = 0; i < FOG_CHECK_ITERATIONS; i ++ ) {
+
+		// find nearest hit
+		uvec4 faceIndices = uvec4( 0u );
+		vec3 faceNormal = vec3( 0.0, 0.0, 1.0 );
+		vec3 barycoord = vec3( 0.0 );
+		float side = 1.0;
+		float dist = 0.0;
+		bool hit = bvhIntersectFirstHit( bvh, rayOrigin, rayDirection, faceIndices, faceNormal, barycoord, side, dist );
+		if ( hit ) {
+
+			// if it's a fog volume return whether we hit the front or back face
+			uint materialIndex = uTexelFetch1D( materialIndexAttribute, faceIndices.x ).r;
+			if ( isMaterialFogVolume( materials, materialIndex ) ) {
+
+				material = readMaterialInfo( materials, materialIndex );
+				return side == - 1.0;
+
+			} else {
+
+				// move the ray forward
+				rayOrigin = stepRayOrigin( rayOrigin, rayDirection, - faceNormal, dist );
+
+			}
+
+		} else {
+
+			return false;
+
+		}
+
+	}
+
+	return false;
+
+}
+
+`;
+
+	const lightsStructGLSL = /* glsl */`
+
+	#define RECT_AREA_LIGHT_TYPE 0
+	#define CIRC_AREA_LIGHT_TYPE 1
+	#define SPOT_LIGHT_TYPE 2
+	#define DIR_LIGHT_TYPE 3
+	#define POINT_LIGHT_TYPE 4
+
+	struct LightsInfo {
+
+		sampler2D tex;
+		uint count;
+
+	};
+
+	struct Light {
+
+		vec3 position;
+		int type;
+
+		vec3 color;
+		float intensity;
+
+		vec3 u;
+		vec3 v;
+		float area;
+
+		// spot light fields
+		float radius;
+		float near;
+		float decay;
+		float distance;
+		float coneCos;
+		float penumbraCos;
+		int iesProfile;
+
+	};
+
+	Light readLightInfo( sampler2D tex, uint index ) {
+
+		uint i = index * 6u;
+
+		vec4 s0 = texelFetch1D( tex, i + 0u );
+		vec4 s1 = texelFetch1D( tex, i + 1u );
+		vec4 s2 = texelFetch1D( tex, i + 2u );
+		vec4 s3 = texelFetch1D( tex, i + 3u );
+
+		Light l;
+		l.position = s0.rgb;
+		l.type = int( round( s0.a ) );
+
+		l.color = s1.rgb;
+		l.intensity = s1.a;
+
+		l.u = s2.rgb;
+		l.v = s3.rgb;
+		l.area = s3.a;
+
+		if ( l.type == SPOT_LIGHT_TYPE || l.type == POINT_LIGHT_TYPE ) {
+
+			vec4 s4 = texelFetch1D( tex, i + 4u );
+			vec4 s5 = texelFetch1D( tex, i + 5u );
+			l.radius = s4.r;
+			l.near = s4.g;
+			l.decay = s4.b;
+			l.distance = s4.a;
+
+			l.coneCos = s5.r;
+			l.penumbraCos = s5.g;
+			l.iesProfile = int( round ( s5.b ) );
+
+		}
+
+		return l;
+
+	}
+
+`;
+
+	const materialStructGLSL = /* glsl */ `
+
+	struct Material {
+
+		vec3 color;
+		int map;
+
+		float metalness;
+		int metalnessMap;
+
+		float roughness;
+		int roughnessMap;
+
+		float ior;
+		float transmission;
+		int transmissionMap;
+
+		float emissiveIntensity;
+		vec3 emissive;
+		int emissiveMap;
+
+		int normalMap;
+		vec2 normalScale;
+
+		float clearcoat;
+		int clearcoatMap;
+		int clearcoatNormalMap;
+		vec2 clearcoatNormalScale;
+		float clearcoatRoughness;
+		int clearcoatRoughnessMap;
+
+		int iridescenceMap;
+		int iridescenceThicknessMap;
+		float iridescence;
+		float iridescenceIor;
+		float iridescenceThicknessMinimum;
+		float iridescenceThicknessMaximum;
+
+		vec3 specularColor;
+		int specularColorMap;
+
+		float specularIntensity;
+		int specularIntensityMap;
+		bool thinFilm;
+
+		vec3 attenuationColor;
+		float attenuationDistance;
+
+		int alphaMap;
+
+		bool castShadow;
+		float opacity;
+		float alphaTest;
+
+		float side;
+		bool matte;
+
+		float sheen;
+		vec3 sheenColor;
+		int sheenColorMap;
+		float sheenRoughness;
+		int sheenRoughnessMap;
+
+		bool vertexColors;
+		bool flatShading;
+		bool transparent;
+		bool fogVolume;
+
+		mat3 mapTransform;
+		mat3 metalnessMapTransform;
+		mat3 roughnessMapTransform;
+		mat3 transmissionMapTransform;
+		mat3 emissiveMapTransform;
+		mat3 normalMapTransform;
+		mat3 clearcoatMapTransform;
+		mat3 clearcoatNormalMapTransform;
+		mat3 clearcoatRoughnessMapTransform;
+		mat3 sheenColorMapTransform;
+		mat3 sheenRoughnessMapTransform;
+		mat3 iridescenceMapTransform;
+		mat3 iridescenceThicknessMapTransform;
+		mat3 specularColorMapTransform;
+		mat3 specularIntensityMapTransform;
+
+	};
+
+	mat3 readTextureTransform( sampler2D tex, uint index ) {
+
+		mat3 textureTransform;
+
+		vec4 row1 = texelFetch1D( tex, index );
+		vec4 row2 = texelFetch1D( tex, index + 1u );
+
+		textureTransform[0] = vec3(row1.r, row2.r, 0.0);
+		textureTransform[1] = vec3(row1.g, row2.g, 0.0);
+		textureTransform[2] = vec3(row1.b, row2.b, 1.0);
+
+		return textureTransform;
+
+	}
+
+	Material readMaterialInfo( sampler2D tex, uint index ) {
+
+		uint i = index * 45u;
+
+		vec4 s0 = texelFetch1D( tex, i + 0u );
+		vec4 s1 = texelFetch1D( tex, i + 1u );
+		vec4 s2 = texelFetch1D( tex, i + 2u );
+		vec4 s3 = texelFetch1D( tex, i + 3u );
+		vec4 s4 = texelFetch1D( tex, i + 4u );
+		vec4 s5 = texelFetch1D( tex, i + 5u );
+		vec4 s6 = texelFetch1D( tex, i + 6u );
+		vec4 s7 = texelFetch1D( tex, i + 7u );
+		vec4 s8 = texelFetch1D( tex, i + 8u );
+		vec4 s9 = texelFetch1D( tex, i + 9u );
+		vec4 s10 = texelFetch1D( tex, i + 10u );
+		vec4 s11 = texelFetch1D( tex, i + 11u );
+		vec4 s12 = texelFetch1D( tex, i + 12u );
+		vec4 s13 = texelFetch1D( tex, i + 13u );
+		vec4 s14 = texelFetch1D( tex, i + 14u );
+
+		Material m;
+		m.color = s0.rgb;
+		m.map = int( round( s0.a ) );
+
+		m.metalness = s1.r;
+		m.metalnessMap = int( round( s1.g ) );
+		m.roughness = s1.b;
+		m.roughnessMap = int( round( s1.a ) );
+
+		m.ior = s2.r;
+		m.transmission = s2.g;
+		m.transmissionMap = int( round( s2.b ) );
+		m.emissiveIntensity = s2.a;
+
+		m.emissive = s3.rgb;
+		m.emissiveMap = int( round( s3.a ) );
+
+		m.normalMap = int( round( s4.r ) );
+		m.normalScale = s4.gb;
+
+		m.clearcoat = s4.a;
+		m.clearcoatMap = int( round( s5.r ) );
+		m.clearcoatRoughness = s5.g;
+		m.clearcoatRoughnessMap = int( round( s5.b ) );
+		m.clearcoatNormalMap = int( round( s5.a ) );
+		m.clearcoatNormalScale = s6.rg;
+
+		m.sheen = s6.a;
+		m.sheenColor = s7.rgb;
+		m.sheenColorMap = int( round( s7.a ) );
+		m.sheenRoughness = s8.r;
+		m.sheenRoughnessMap = int( round( s8.g ) );
+
+		m.iridescenceMap = int( round( s8.b ) );
+		m.iridescenceThicknessMap = int( round( s8.a ) );
+		m.iridescence = s9.r;
+		m.iridescenceIor = s9.g;
+		m.iridescenceThicknessMinimum = s9.b;
+		m.iridescenceThicknessMaximum = s9.a;
+
+		m.specularColor = s10.rgb;
+		m.specularColorMap = int( round( s10.a ) );
+
+		m.specularIntensity = s11.r;
+		m.specularIntensityMap = int( round( s11.g ) );
+		m.thinFilm = bool( s11.b );
+
+		m.attenuationColor = s12.rgb;
+		m.attenuationDistance = s12.a;
+
+		m.alphaMap = int( round( s13.r ) );
+
+		m.opacity = s13.g;
+		m.alphaTest = s13.b;
+		m.side = s13.a;
+
+		m.matte = bool( s14.r );
+		m.castShadow = ! bool( s14.g );
+		m.vertexColors = bool( int( s14.b ) & 1 );
+		m.flatShading = bool( int( s14.b ) & 2 );
+		m.fogVolume = bool( int( s14.b ) & 4 );
+		m.transparent = bool( s14.a );
+
+		uint firstTextureTransformIdx = i + 15u;
+
+		m.mapTransform = m.map == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx );
+		m.metalnessMapTransform = m.metalnessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 2u );
+		m.roughnessMapTransform = m.roughnessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 4u );
+		m.transmissionMapTransform = m.transmissionMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 6u );
+		m.emissiveMapTransform = m.emissiveMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 8u );
+		m.normalMapTransform = m.normalMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 10u );
+		m.clearcoatMapTransform = m.clearcoatMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 12u );
+		m.clearcoatNormalMapTransform = m.clearcoatNormalMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 14u );
+		m.clearcoatRoughnessMapTransform = m.clearcoatRoughnessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 16u );
+		m.sheenColorMapTransform = m.sheenColorMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 18u );
+		m.sheenRoughnessMapTransform = m.sheenRoughnessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 20u );
+		m.iridescenceMapTransform = m.iridescenceMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 22u );
+		m.iridescenceThicknessMapTransform = m.iridescenceThicknessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 24u );
+		m.specularColorMapTransform = m.specularColorMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 26u );
+		m.specularIntensityMapTransform = m.specularIntensityMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 28u );
+
+		return m;
+
+	}
+
+`;
+
 	class DenoiseMaterial extends MaterialBase {
 
 		constructor( parameters ) {
@@ -4560,384 +5312,6 @@
 		}
 
 	}
-
-	const cameraStructGLSL = /* glsl */`
-
-	struct PhysicalCamera {
-
-		float focusDistance;
-		float anamorphicRatio;
-		float bokehSize;
-		int apertureBlades;
-		float apertureRotation;
-
-	};
-
-`;
-
-	const equirectStructGLSL = /* glsl */`
-
-	struct EquirectHdrInfo {
-
-		sampler2D marginalWeights;
-		sampler2D conditionalWeights;
-		sampler2D map;
-
-		float totalSum;
-
-	};
-
-`;
-
-	const lightsStructGLSL = /* glsl */`
-
-	#define RECT_AREA_LIGHT_TYPE 0
-	#define CIRC_AREA_LIGHT_TYPE 1
-	#define SPOT_LIGHT_TYPE 2
-	#define DIR_LIGHT_TYPE 3
-	#define POINT_LIGHT_TYPE 4
-
-	struct LightsInfo {
-
-		sampler2D tex;
-		uint count;
-
-	};
-
-	struct Light {
-
-		vec3 position;
-		int type;
-
-		vec3 color;
-		float intensity;
-
-		vec3 u;
-		vec3 v;
-		float area;
-
-		// spot light fields
-		float radius;
-		float near;
-		float decay;
-		float distance;
-		float coneCos;
-		float penumbraCos;
-		int iesProfile;
-
-	};
-
-	Light readLightInfo( sampler2D tex, uint index ) {
-
-		uint i = index * 6u;
-
-		vec4 s0 = texelFetch1D( tex, i + 0u );
-		vec4 s1 = texelFetch1D( tex, i + 1u );
-		vec4 s2 = texelFetch1D( tex, i + 2u );
-		vec4 s3 = texelFetch1D( tex, i + 3u );
-
-		Light l;
-		l.position = s0.rgb;
-		l.type = int( round( s0.a ) );
-
-		l.color = s1.rgb;
-		l.intensity = s1.a;
-
-		l.u = s2.rgb;
-		l.v = s3.rgb;
-		l.area = s3.a;
-
-		if ( l.type == SPOT_LIGHT_TYPE || l.type == POINT_LIGHT_TYPE ) {
-
-			vec4 s4 = texelFetch1D( tex, i + 4u );
-			vec4 s5 = texelFetch1D( tex, i + 5u );
-			l.radius = s4.r;
-			l.near = s4.g;
-			l.decay = s4.b;
-			l.distance = s4.a;
-
-			l.coneCos = s5.r;
-			l.penumbraCos = s5.g;
-			l.iesProfile = int( round ( s5.b ) );
-
-		}
-
-		return l;
-
-	}
-
-`;
-
-	const materialStructGLSL = /* glsl */ `
-
-	struct Material {
-
-		vec3 color;
-		int map;
-
-		float metalness;
-		int metalnessMap;
-
-		float roughness;
-		int roughnessMap;
-
-		float ior;
-		float transmission;
-		int transmissionMap;
-
-		float emissiveIntensity;
-		vec3 emissive;
-		int emissiveMap;
-
-		int normalMap;
-		vec2 normalScale;
-
-		float clearcoat;
-		int clearcoatMap;
-		int clearcoatNormalMap;
-		vec2 clearcoatNormalScale;
-		float clearcoatRoughness;
-		int clearcoatRoughnessMap;
-
-		int iridescenceMap;
-		int iridescenceThicknessMap;
-		float iridescence;
-		float iridescenceIor;
-		float iridescenceThicknessMinimum;
-		float iridescenceThicknessMaximum;
-
-		vec3 specularColor;
-		int specularColorMap;
-
-		float specularIntensity;
-		int specularIntensityMap;
-		bool thinFilm;
-
-		vec3 attenuationColor;
-		float attenuationDistance;
-
-		int alphaMap;
-
-		bool castShadow;
-		float opacity;
-		float alphaTest;
-
-		float side;
-		bool matte;
-
-		float sheen;
-		vec3 sheenColor;
-		int sheenColorMap;
-		float sheenRoughness;
-		int sheenRoughnessMap;
-
-		bool vertexColors;
-		bool flatShading;
-		bool transparent;
-		bool fogVolume;
-
-		mat3 mapTransform;
-		mat3 metalnessMapTransform;
-		mat3 roughnessMapTransform;
-		mat3 transmissionMapTransform;
-		mat3 emissiveMapTransform;
-		mat3 normalMapTransform;
-		mat3 clearcoatMapTransform;
-		mat3 clearcoatNormalMapTransform;
-		mat3 clearcoatRoughnessMapTransform;
-		mat3 sheenColorMapTransform;
-		mat3 sheenRoughnessMapTransform;
-		mat3 iridescenceMapTransform;
-		mat3 iridescenceThicknessMapTransform;
-		mat3 specularColorMapTransform;
-		mat3 specularIntensityMapTransform;
-
-	};
-
-	mat3 readTextureTransform( sampler2D tex, uint index ) {
-
-		mat3 textureTransform;
-
-		vec4 row1 = texelFetch1D( tex, index );
-		vec4 row2 = texelFetch1D( tex, index + 1u );
-
-		textureTransform[0] = vec3(row1.r, row2.r, 0.0);
-		textureTransform[1] = vec3(row1.g, row2.g, 0.0);
-		textureTransform[2] = vec3(row1.b, row2.b, 1.0);
-
-		return textureTransform;
-
-	}
-
-	Material readMaterialInfo( sampler2D tex, uint index ) {
-
-		uint i = index * 45u;
-
-		vec4 s0 = texelFetch1D( tex, i + 0u );
-		vec4 s1 = texelFetch1D( tex, i + 1u );
-		vec4 s2 = texelFetch1D( tex, i + 2u );
-		vec4 s3 = texelFetch1D( tex, i + 3u );
-		vec4 s4 = texelFetch1D( tex, i + 4u );
-		vec4 s5 = texelFetch1D( tex, i + 5u );
-		vec4 s6 = texelFetch1D( tex, i + 6u );
-		vec4 s7 = texelFetch1D( tex, i + 7u );
-		vec4 s8 = texelFetch1D( tex, i + 8u );
-		vec4 s9 = texelFetch1D( tex, i + 9u );
-		vec4 s10 = texelFetch1D( tex, i + 10u );
-		vec4 s11 = texelFetch1D( tex, i + 11u );
-		vec4 s12 = texelFetch1D( tex, i + 12u );
-		vec4 s13 = texelFetch1D( tex, i + 13u );
-		vec4 s14 = texelFetch1D( tex, i + 14u );
-
-		Material m;
-		m.color = s0.rgb;
-		m.map = int( round( s0.a ) );
-
-		m.metalness = s1.r;
-		m.metalnessMap = int( round( s1.g ) );
-		m.roughness = s1.b;
-		m.roughnessMap = int( round( s1.a ) );
-
-		m.ior = s2.r;
-		m.transmission = s2.g;
-		m.transmissionMap = int( round( s2.b ) );
-		m.emissiveIntensity = s2.a;
-
-		m.emissive = s3.rgb;
-		m.emissiveMap = int( round( s3.a ) );
-
-		m.normalMap = int( round( s4.r ) );
-		m.normalScale = s4.gb;
-
-		m.clearcoat = s4.a;
-		m.clearcoatMap = int( round( s5.r ) );
-		m.clearcoatRoughness = s5.g;
-		m.clearcoatRoughnessMap = int( round( s5.b ) );
-		m.clearcoatNormalMap = int( round( s5.a ) );
-		m.clearcoatNormalScale = s6.rg;
-
-		m.sheen = s6.a;
-		m.sheenColor = s7.rgb;
-		m.sheenColorMap = int( round( s7.a ) );
-		m.sheenRoughness = s8.r;
-		m.sheenRoughnessMap = int( round( s8.g ) );
-
-		m.iridescenceMap = int( round( s8.b ) );
-		m.iridescenceThicknessMap = int( round( s8.a ) );
-		m.iridescence = s9.r;
-		m.iridescenceIor = s9.g;
-		m.iridescenceThicknessMinimum = s9.b;
-		m.iridescenceThicknessMaximum = s9.a;
-
-		m.specularColor = s10.rgb;
-		m.specularColorMap = int( round( s10.a ) );
-
-		m.specularIntensity = s11.r;
-		m.specularIntensityMap = int( round( s11.g ) );
-		m.thinFilm = bool( s11.b );
-
-		m.attenuationColor = s12.rgb;
-		m.attenuationDistance = s12.a;
-
-		m.alphaMap = int( round( s13.r ) );
-
-		m.opacity = s13.g;
-		m.alphaTest = s13.b;
-		m.side = s13.a;
-
-		m.matte = bool( s14.r );
-		m.castShadow = ! bool( s14.g );
-		m.vertexColors = bool( int( s14.b ) & 1 );
-		m.flatShading = bool( int( s14.b ) & 2 );
-		m.fogVolume = bool( int( s14.b ) & 4 );
-		m.transparent = bool( s14.a );
-
-		uint firstTextureTransformIdx = i + 15u;
-
-		m.mapTransform = m.map == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx );
-		m.metalnessMapTransform = m.metalnessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 2u );
-		m.roughnessMapTransform = m.roughnessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 4u );
-		m.transmissionMapTransform = m.transmissionMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 6u );
-		m.emissiveMapTransform = m.emissiveMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 8u );
-		m.normalMapTransform = m.normalMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 10u );
-		m.clearcoatMapTransform = m.clearcoatMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 12u );
-		m.clearcoatNormalMapTransform = m.clearcoatNormalMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 14u );
-		m.clearcoatRoughnessMapTransform = m.clearcoatRoughnessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 16u );
-		m.sheenColorMapTransform = m.sheenColorMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 18u );
-		m.sheenRoughnessMapTransform = m.sheenRoughnessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 20u );
-		m.iridescenceMapTransform = m.iridescenceMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 22u );
-		m.iridescenceThicknessMapTransform = m.iridescenceThicknessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 24u );
-		m.specularColorMapTransform = m.specularColorMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 26u );
-		m.specularIntensityMapTransform = m.specularIntensityMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 28u );
-
-		return m;
-
-	}
-
-`;
-
-	const fogMaterialBvhGLSL = /* glsl */`
-
-#ifndef FOG_CHECK_ITERATIONS
-#define FOG_CHECK_ITERATIONS 30
-#endif
-
-// returns whether the given material is a fog material or not
-bool isMaterialFogVolume( sampler2D materials, uint materialIndex ) {
-
-	uint i = materialIndex * 45u;
-	vec4 s14 = texelFetch1D( materials, i + 14u );
-	return bool( int( s14.b ) & 4 );
-
-}
-
-// returns true if we're within the first fog volume we hit
-bool bvhIntersectFogVolumeHit(
-	BVH bvh, vec3 rayOrigin, vec3 rayDirection,
-	usampler2D materialIndexAttribute, sampler2D materials,
-	out Material material
-) {
-
-	material.fogVolume = false;
-
-	for ( int i = 0; i < FOG_CHECK_ITERATIONS; i ++ ) {
-
-		// find nearest hit
-		uvec4 faceIndices = uvec4( 0u );
-		vec3 faceNormal = vec3( 0.0, 0.0, 1.0 );
-		vec3 barycoord = vec3( 0.0 );
-		float side = 1.0;
-		float dist = 0.0;
-		bool hit = bvhIntersectFirstHit( bvh, rayOrigin, rayDirection, faceIndices, faceNormal, barycoord, side, dist );
-		if ( hit ) {
-
-			// if it's a fog volume return whether we hit the front or back face
-			uint materialIndex = uTexelFetch1D( materialIndexAttribute, faceIndices.x ).r;
-			if ( isMaterialFogVolume( materials, materialIndex ) ) {
-
-				material = readMaterialInfo( materials, materialIndex );
-				return side == - 1.0;
-
-			} else {
-
-				// move the ray forward
-				rayOrigin = stepRayOrigin( rayOrigin, rayDirection, - faceNormal, dist );
-
-			}
-
-		} else {
-
-			return false;
-
-		}
-
-	}
-
-	return false;
-
-}
-
-`;
 
 	const ggxGLSL = /* glsl */`
 
@@ -5793,380 +6167,6 @@ bool bvhIntersectFogVolumeHit(
 		return sampleRec;
 
 	}
-
-`;
-
-	const equirectSamplingGLSL = /* glsl */`
-
-	// samples the the given environment map in the given direction
-	vec3 sampleEquirectColor( sampler2D envMap, vec3 direction ) {
-
-		return texture2D( envMap, equirectDirectionToUv( direction ) ).rgb;
-
-	}
-
-	// gets the pdf of the given direction to sample
-	float equirectDirectionPdf( vec3 direction ) {
-
-		vec2 uv = equirectDirectionToUv( direction );
-		float theta = uv.y * PI;
-		float sinTheta = sin( theta );
-		if ( sinTheta == 0.0 ) {
-
-			return 0.0;
-
-		}
-
-		return 1.0 / ( 2.0 * PI * PI * sinTheta );
-
-	}
-
-	// samples the color given env map with CDF and returns the pdf of the direction
-	float sampleEquirect( EquirectHdrInfo info, vec3 direction, out vec3 color ) {
-
-		vec2 uv = equirectDirectionToUv( direction );
-		color = texture2D( info.map, uv ).rgb;
-
-		float totalSum = info.totalSum;
-		float lum = luminance( color );
-		ivec2 resolution = textureSize( info.map, 0 );
-		float pdf = lum / totalSum;
-
-		return float( resolution.x * resolution.y ) * pdf * equirectDirectionPdf( direction );
-
-	}
-
-	// samples a direction of the envmap with color and retrieves pdf
-	float sampleEquirectProbability( EquirectHdrInfo info, vec2 r, out vec3 color, out vec3 direction ) {
-
-		// sample env map cdf
-		float v = texture2D( info.marginalWeights, vec2( r.x, 0.0 ) ).x;
-		float u = texture2D( info.conditionalWeights, vec2( r.y, v ) ).x;
-		vec2 uv = vec2( u, v );
-
-		vec3 derivedDirection = equirectUvToDirection( uv );
-		direction = derivedDirection;
-		color = texture2D( info.map, uv ).rgb;
-
-		float totalSum = info.totalSum;
-		float lum = luminance( color );
-		ivec2 resolution = textureSize( info.map, 0 );
-		float pdf = lum / totalSum;
-
-		return float( resolution.x * resolution.y ) * pdf * equirectDirectionPdf( direction );
-
-	}
-
-`;
-
-	const lightSamplingGLSL = /* glsl */`
-
-	float getSpotAttenuation( const in float coneCosine, const in float penumbraCosine, const in float angleCosine ) {
-
-		return smoothstep( coneCosine, penumbraCosine, angleCosine );
-
-	}
-
-	float getDistanceAttenuation( const in float lightDistance, const in float cutoffDistance, const in float decayExponent ) {
-
-		// based upon Frostbite 3 Moving to Physically-based Rendering
-		// page 32, equation 26: E[window1]
-		// https://seblagarde.files.wordpress.com/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf
-		float distanceFalloff = 1.0 / max( pow( lightDistance, decayExponent ), EPSILON );
-
-		if ( cutoffDistance > 0.0 ) {
-
-			distanceFalloff *= pow2( saturate( 1.0 - pow4( lightDistance / cutoffDistance ) ) );
-
-		}
-
-		return distanceFalloff;
-
-	}
-
-	float getPhotometricAttenuation( sampler2DArray iesProfiles, int iesProfile, vec3 posToLight, vec3 lightDir, vec3 u, vec3 v ) {
-
-		float cosTheta = dot( posToLight, lightDir );
-		float angle = acos( cosTheta ) * ( 1.0 / PI );
-
-		return texture2D( iesProfiles, vec3( 0.0, angle, iesProfile ) ).r;
-
-	}
-
-	struct LightRecord {
-
-		float dist;
-		vec3 direction;
-		float pdf;
-		vec3 emission;
-		int type;
-
-	};
-
-	bool lightsClosestHit( sampler2D lights, uint lightCount, vec3 rayOrigin, vec3 rayDirection, out LightRecord lightRec ) {
-
-		bool didHit = false;
-		uint l;
-		for ( l = 0u; l < lightCount; l ++ ) {
-
-			Light light = readLightInfo( lights, l );
-
-			vec3 u = light.u;
-			vec3 v = light.v;
-
-			// check for backface
-			vec3 normal = normalize( cross( u, v ) );
-			if ( dot( normal, rayDirection ) < 0.0 ) {
-
-				continue;
-
-			}
-
-			u *= 1.0 / dot( u, u );
-			v *= 1.0 / dot( v, v );
-
-			float dist;
-
-			// MIS / light intersection is not supported for punctual lights.
-			if(
-				( light.type == RECT_AREA_LIGHT_TYPE && intersectsRectangle( light.position, normal, u, v, rayOrigin, rayDirection, dist ) ) ||
-				( light.type == CIRC_AREA_LIGHT_TYPE && intersectsCircle( light.position, normal, u, v, rayOrigin, rayDirection, dist ) )
-			) {
-
-				if ( ! didHit || dist < lightRec.dist ) {
-
-					float cosTheta = dot( rayDirection, normal );
-					didHit = true;
-					lightRec.dist = dist;
-					lightRec.pdf = ( dist * dist ) / ( light.area * cosTheta );
-					lightRec.emission = light.color * light.intensity;
-					lightRec.direction = rayDirection;
-					lightRec.type = light.type;
-
-				}
-
-			}
-
-		}
-
-		return didHit;
-
-	}
-
-	LightRecord randomAreaLightSample( Light light, vec3 rayOrigin, vec2 ruv ) {
-
-		LightRecord lightRec;
-		lightRec.type = light.type;
-
-		lightRec.emission = light.color * light.intensity;
-
-		vec3 randomPos;
-		if( light.type == RECT_AREA_LIGHT_TYPE ) {
-
-			// rectangular area light
-			randomPos = light.position + light.u * ( ruv.x - 0.5 ) + light.v * ( ruv.y - 0.5 );
-
-		} else if( light.type == CIRC_AREA_LIGHT_TYPE ) {
-
-			// circular area light
-			float r = 0.5 * sqrt( ruv.x );
-			float theta = ruv.y * 2.0 * PI;
-			float x = r * cos( theta );
-			float y = r * sin( theta );
-
-			randomPos = light.position + light.u * x + light.v * y;
-
-		}
-
-		vec3 toLight = randomPos - rayOrigin;
-		float lightDistSq = dot( toLight, toLight );
-		lightRec.dist = sqrt( lightDistSq );
-
-		vec3 direction = toLight / lightRec.dist;
-		lightRec.direction = direction;
-
-		vec3 lightNormal = normalize( cross( light.u, light.v ) );
-		lightRec.pdf = lightDistSq / ( light.area * dot( direction, lightNormal ) );
-
-		return lightRec;
-
-	}
-
-	LightRecord randomSpotLightSample( Light light, sampler2DArray iesProfiles, vec3 rayOrigin, vec2 ruv ) {
-
-		float radius = light.radius * sqrt( ruv.x );
-		float theta = ruv.y * 2.0 * PI;
-		float x = radius * cos( theta );
-		float y = radius * sin( theta );
-
-		vec3 u = light.u;
-		vec3 v = light.v;
-		vec3 normal = normalize( cross( u, v ) );
-
-		float angle = acos( light.coneCos );
-		float angleTan = tan( angle );
-		float startDistance = light.radius / max( angleTan, EPSILON );
-
-		vec3 randomPos = light.position - normal * startDistance + u * x + v * y;
-		vec3 toLight = randomPos - rayOrigin;
-		float lightDistSq = dot( toLight, toLight );
-		float dist = sqrt( lightDistSq );
-
-		vec3 direction = toLight / max( dist, EPSILON );
-		float cosTheta = dot( direction, normal );
-
-		float spotAttenuation = light.iesProfile != - 1 ?
-			getPhotometricAttenuation( iesProfiles, light.iesProfile, direction, normal, u, v ) :
-			getSpotAttenuation( light.coneCos, light.penumbraCos, cosTheta );
-
-		float distanceAttenuation = getDistanceAttenuation( dist, light.distance, light.decay );
-		LightRecord lightRec;
-		lightRec.type = light.type;
-		lightRec.dist = dist;
-		lightRec.direction = direction;
-		lightRec.emission = light.color * light.intensity * distanceAttenuation * spotAttenuation;
-		lightRec.pdf = 1.0;
-
-		return lightRec;
-
-	}
-
-	LightRecord randomLightSample( sampler2D lights, sampler2DArray iesProfiles, uint lightCount, vec3 rayOrigin, vec3 ruv ) {
-
-		// pick a random light
-		uint l = uint( ruv.x * float( lightCount ) );
-		Light light = readLightInfo( lights, l );
-
-		if ( light.type == SPOT_LIGHT_TYPE ) {
-
-			return randomSpotLightSample( light, iesProfiles, rayOrigin, ruv.yz );
-
-		} else if ( light.type == POINT_LIGHT_TYPE ) {
-
-			vec3 lightRay = light.u - rayOrigin;
-			float lightDist = length( lightRay );
-			float cutoffDistance = light.distance;
-			float distanceFalloff = 1.0 / max( pow( lightDist, light.decay ), 0.01 );
-			if ( cutoffDistance > 0.0 ) {
-
-				distanceFalloff *= pow2( saturate( 1.0 - pow4( lightDist / cutoffDistance ) ) );
-
-			}
-
-			LightRecord rec;
-			rec.direction = normalize( lightRay );
-			rec.dist = length( lightRay );
-			rec.pdf = 1.0;
-			rec.emission = light.color * light.intensity * distanceFalloff;
-			rec.type = light.type;
-			return rec;
-
-		} else if ( light.type == DIR_LIGHT_TYPE ) {
-
-			LightRecord rec;
-			rec.dist = 1e10;
-			rec.direction = light.u;
-			rec.pdf = 1.0;
-			rec.emission = light.color * light.intensity;
-			rec.type = light.type;
-
-			return rec;
-
-		} else {
-
-			// sample the light
-			return randomAreaLightSample( light, rayOrigin, ruv.yz );
-
-		}
-
-	}
-
-`;
-
-	const shapeSamplingGLSL = /* glsl */`
-
-	vec3 sampleHemisphere( vec3 n, vec2 uv ) {
-
-		// https://www.rorydriscoll.com/2009/01/07/better-sampling/
-		// https://graphics.pixar.com/library/OrthonormalB/paper.pdf
-		float sign = n.z == 0.0 ? 1.0 : sign( n.z );
-		float a = - 1.0 / ( sign + n.z );
-		float b = n.x * n.y * a;
-		vec3 b1 = vec3( 1.0 + sign * n.x * n.x * a, sign * b, - sign * n.x );
-		vec3 b2 = vec3( b, sign + n.y * n.y * a, - n.y );
-
-		float r = sqrt( uv.x );
-		float theta = 2.0 * PI * uv.y;
-		float x = r * cos( theta );
-		float y = r * sin( theta );
-		return x * b1 + y * b2 + sqrt( 1.0 - uv.x ) * n;
-
-	}
-
-	vec2 sampleTriangle( vec2 a, vec2 b, vec2 c, vec2 r ) {
-
-		// get the edges of the triangle and the diagonal across the
-		// center of the parallelogram
-		vec2 e1 = a - b;
-		vec2 e2 = c - b;
-		vec2 diag = normalize( e1 + e2 );
-
-		// pick the point in the parallelogram
-		if ( r.x + r.y > 1.0 ) {
-
-			r = vec2( 1.0 ) - r;
-
-		}
-
-		return e1 * r.x + e2 * r.y;
-
-	}
-
-	vec2 sampleCircle( vec2 uv ) {
-
-		float angle = 2.0 * PI * uv.x;
-		float radius = sqrt( uv.y );
-		return vec2( cos( angle ), sin( angle ) ) * radius;
-
-	}
-
-	vec3 sampleSphere( vec2 uv ) {
-
-		float u = ( uv.x - 0.5 ) * 2.0;
-		float t = uv.y * PI * 2.0;
-		float f = sqrt( 1.0 - u * u );
-
-		return vec3( f * cos( t ), f * sin( t ), u );
-
-	}
-
-	vec2 sampleRegularPolygon( int sides, vec3 uvw ) {
-
-		sides = max( sides, 3 );
-
-		vec3 r = uvw;
-		float anglePerSegment = 2.0 * PI / float( sides );
-		float segment = floor( float( sides ) * r.x );
-
-		float angle1 = anglePerSegment * segment;
-		float angle2 = angle1 + anglePerSegment;
-		vec2 a = vec2( sin( angle1 ), cos( angle1 ) );
-		vec2 b = vec2( 0.0, 0.0 );
-		vec2 c = vec2( sin( angle2 ), cos( angle2 ) );
-
-		return sampleTriangle( a, b, c, r.yz );
-
-	}
-
-	// samples an aperture shape with the given number of sides. 0 means circle
-	vec2 sampleAperture( int blades, vec3 uvw ) {
-
-		return blades == 0 ?
-			sampleCircle( uvw.xy ) :
-			sampleRegularPolygon( blades, uvw );
-
-	}
-
 
 `;
 
@@ -7902,12 +7902,20 @@ bool bvhIntersectFogVolumeHit(
 	exports.RenderTarget2DArray = RenderTarget2DArray;
 	exports.ShapedAreaLight = ShapedAreaLight;
 	exports.arraySamplerTexelFetchGLSL = arraySamplerTexelFetchGLSL;
+	exports.cameraStructGLSL = cameraStructGLSL;
+	exports.equirectSamplingGLSL = equirectSamplingGLSL;
+	exports.equirectStructGLSL = equirectStructGLSL;
+	exports.fogMaterialBvhGLSL = fogMaterialBvhGLSL;
 	exports.fresnelGLSL = fresnelGLSL;
 	exports.getGroupMaterialIndicesAttribute = getGroupMaterialIndicesAttribute;
+	exports.lightSamplingGLSL = lightSamplingGLSL;
+	exports.lightsStructGLSL = lightsStructGLSL;
+	exports.materialStructGLSL = materialStructGLSL;
 	exports.mathGLSL = mathGLSL;
 	exports.mergeMeshes = mergeMeshes;
 	exports.pcgGLSL = pcgGLSL;
 	exports.setCommonAttributes = setCommonAttributes;
+	exports.shapeSamplingGLSL = shapeSamplingGLSL;
 	exports.sobolCommonGLSL = sobolCommonGLSL;
 	exports.sobolGenerationGLSL = sobolGenerationGLSL;
 	exports.sobolSamplingGLSL = sobolSamplingGLSL;

@@ -38,6 +38,19 @@ export * from './shader/common/fresnel.glsl.js';
 export * from './shader/common/utils.glsl.js';
 export * from './shader/common/math.glsl.js';
 
+// shader sampling
+export * from './shader/sampling/equirectSampling.glsl.js';
+export * from './shader/sampling/lightSampling.glsl.js';
+export * from './shader/sampling/shapeSampling.glsl.js';
+
+
+// shader structs
+export * from './shader/structs/cameraStruct.glsl.js';
+export * from './shader/structs/equirectStruct.glsl.js';
+export * from './shader/structs/fogMaterialBvh.glsl.js';
+export * from './shader/structs/lightsStruct.glsl.js';
+export * from './shader/structs/materialStruct.glsl.js';
+
 
 // materials
 export * from './materials/fullscreen/DenoiseMaterial.js';
