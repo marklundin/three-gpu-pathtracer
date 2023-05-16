@@ -44,6 +44,11 @@ export * from './shader/common/bvhAnyHit.glsl.js';
 export * from './shader/sampling/equirectSampling.glsl.js';
 export * from './shader/sampling/lightSampling.glsl.js';
 export * from './shader/sampling/shapeSampling.glsl.js';
+export * from './shader/bsdf/bsdfSampling.glsl.js';
+export * from './shader/bsdf/fog.glsl.js';
+export * from './shader/bsdf/ggx.glsl.js';
+export * from './shader/bsdf/iridescence.glsl.js';
+export * from './shader/bsdf/sheen.glsl.js';
 
 
 // shader structs
