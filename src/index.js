@@ -2,6 +2,7 @@
 export * from './core/PathTracingRenderer.js';
 export * from './core/QuiltPathTracingRenderer.js';
 export * from './core/PathTracingSceneGenerator.js';
+export * from './workers/PathTracingSceneWorker.js';
 export * from './core/DynamicPathTracingSceneGenerator.js';
 export * from './core/MaterialReducer.js';
 
@@ -16,6 +17,7 @@ export * from './textures/ProceduralEquirectTexture.js';
 export * from './textures/GradientEquirectTexture.js';
 
 // uniforms
+export * from './uniforms/AttributesTextureArray.js';
 export * from './uniforms/MaterialsTexture.js';
 export * from './uniforms/RenderTarget2DArray.js';
 export * from './uniforms/EquirectHdrInfoUniform.js';
