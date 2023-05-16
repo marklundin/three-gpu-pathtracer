@@ -4614,845 +4614,6 @@
 
 `;
 
-	const cameraStructGLSL = /* glsl */`
-
-	struct PhysicalCamera {
-
-		float focusDistance;
-		float anamorphicRatio;
-		float bokehSize;
-		int apertureBlades;
-		float apertureRotation;
-
-	};
-
-`;
-
-	const equirectStructGLSL = /* glsl */`
-
-	struct EquirectHdrInfo {
-
-		sampler2D marginalWeights;
-		sampler2D conditionalWeights;
-		sampler2D map;
-
-		float totalSum;
-
-	};
-
-`;
-
-	const fogMaterialBvhGLSL = /* glsl */`
-
-#ifndef FOG_CHECK_ITERATIONS
-#define FOG_CHECK_ITERATIONS 30
-#endif
-
-// returns whether the given material is a fog material or not
-bool isMaterialFogVolume( sampler2D materials, uint materialIndex ) {
-
-	uint i = materialIndex * 45u;
-	vec4 s14 = texelFetch1D( materials, i + 14u );
-	return bool( int( s14.b ) & 4 );
-
-}
-
-// returns true if we're within the first fog volume we hit
-bool bvhIntersectFogVolumeHit(
-	BVH bvh, vec3 rayOrigin, vec3 rayDirection,
-	usampler2D materialIndexAttribute, sampler2D materials,
-	out Material material
-) {
-
-	material.fogVolume = false;
-
-	for ( int i = 0; i < FOG_CHECK_ITERATIONS; i ++ ) {
-
-		// find nearest hit
-		uvec4 faceIndices = uvec4( 0u );
-		vec3 faceNormal = vec3( 0.0, 0.0, 1.0 );
-		vec3 barycoord = vec3( 0.0 );
-		float side = 1.0;
-		float dist = 0.0;
-		bool hit = bvhIntersectFirstHit( bvh, rayOrigin, rayDirection, faceIndices, faceNormal, barycoord, side, dist );
-		if ( hit ) {
-
-			// if it's a fog volume return whether we hit the front or back face
-			uint materialIndex = uTexelFetch1D( materialIndexAttribute, faceIndices.x ).r;
-			if ( isMaterialFogVolume( materials, materialIndex ) ) {
-
-				material = readMaterialInfo( materials, materialIndex );
-				return side == - 1.0;
-
-			} else {
-
-				// move the ray forward
-				rayOrigin = stepRayOrigin( rayOrigin, rayDirection, - faceNormal, dist );
-
-			}
-
-		} else {
-
-			return false;
-
-		}
-
-	}
-
-	return false;
-
-}
-
-`;
-
-	const lightsStructGLSL = /* glsl */`
-
-	#define RECT_AREA_LIGHT_TYPE 0
-	#define CIRC_AREA_LIGHT_TYPE 1
-	#define SPOT_LIGHT_TYPE 2
-	#define DIR_LIGHT_TYPE 3
-	#define POINT_LIGHT_TYPE 4
-
-	struct LightsInfo {
-
-		sampler2D tex;
-		uint count;
-
-	};
-
-	struct Light {
-
-		vec3 position;
-		int type;
-
-		vec3 color;
-		float intensity;
-
-		vec3 u;
-		vec3 v;
-		float area;
-
-		// spot light fields
-		float radius;
-		float near;
-		float decay;
-		float distance;
-		float coneCos;
-		float penumbraCos;
-		int iesProfile;
-
-	};
-
-	Light readLightInfo( sampler2D tex, uint index ) {
-
-		uint i = index * 6u;
-
-		vec4 s0 = texelFetch1D( tex, i + 0u );
-		vec4 s1 = texelFetch1D( tex, i + 1u );
-		vec4 s2 = texelFetch1D( tex, i + 2u );
-		vec4 s3 = texelFetch1D( tex, i + 3u );
-
-		Light l;
-		l.position = s0.rgb;
-		l.type = int( round( s0.a ) );
-
-		l.color = s1.rgb;
-		l.intensity = s1.a;
-
-		l.u = s2.rgb;
-		l.v = s3.rgb;
-		l.area = s3.a;
-
-		if ( l.type == SPOT_LIGHT_TYPE || l.type == POINT_LIGHT_TYPE ) {
-
-			vec4 s4 = texelFetch1D( tex, i + 4u );
-			vec4 s5 = texelFetch1D( tex, i + 5u );
-			l.radius = s4.r;
-			l.near = s4.g;
-			l.decay = s4.b;
-			l.distance = s4.a;
-
-			l.coneCos = s5.r;
-			l.penumbraCos = s5.g;
-			l.iesProfile = int( round ( s5.b ) );
-
-		}
-
-		return l;
-
-	}
-
-`;
-
-	const materialStructGLSL = /* glsl */ `
-
-	struct Material {
-
-		vec3 color;
-		int map;
-
-		float metalness;
-		int metalnessMap;
-
-		float roughness;
-		int roughnessMap;
-
-		float ior;
-		float transmission;
-		int transmissionMap;
-
-		float emissiveIntensity;
-		vec3 emissive;
-		int emissiveMap;
-
-		int normalMap;
-		vec2 normalScale;
-
-		float clearcoat;
-		int clearcoatMap;
-		int clearcoatNormalMap;
-		vec2 clearcoatNormalScale;
-		float clearcoatRoughness;
-		int clearcoatRoughnessMap;
-
-		int iridescenceMap;
-		int iridescenceThicknessMap;
-		float iridescence;
-		float iridescenceIor;
-		float iridescenceThicknessMinimum;
-		float iridescenceThicknessMaximum;
-
-		vec3 specularColor;
-		int specularColorMap;
-
-		float specularIntensity;
-		int specularIntensityMap;
-		bool thinFilm;
-
-		vec3 attenuationColor;
-		float attenuationDistance;
-
-		int alphaMap;
-
-		bool castShadow;
-		float opacity;
-		float alphaTest;
-
-		float side;
-		bool matte;
-
-		float sheen;
-		vec3 sheenColor;
-		int sheenColorMap;
-		float sheenRoughness;
-		int sheenRoughnessMap;
-
-		bool vertexColors;
-		bool flatShading;
-		bool transparent;
-		bool fogVolume;
-
-		mat3 mapTransform;
-		mat3 metalnessMapTransform;
-		mat3 roughnessMapTransform;
-		mat3 transmissionMapTransform;
-		mat3 emissiveMapTransform;
-		mat3 normalMapTransform;
-		mat3 clearcoatMapTransform;
-		mat3 clearcoatNormalMapTransform;
-		mat3 clearcoatRoughnessMapTransform;
-		mat3 sheenColorMapTransform;
-		mat3 sheenRoughnessMapTransform;
-		mat3 iridescenceMapTransform;
-		mat3 iridescenceThicknessMapTransform;
-		mat3 specularColorMapTransform;
-		mat3 specularIntensityMapTransform;
-
-	};
-
-	mat3 readTextureTransform( sampler2D tex, uint index ) {
-
-		mat3 textureTransform;
-
-		vec4 row1 = texelFetch1D( tex, index );
-		vec4 row2 = texelFetch1D( tex, index + 1u );
-
-		textureTransform[0] = vec3(row1.r, row2.r, 0.0);
-		textureTransform[1] = vec3(row1.g, row2.g, 0.0);
-		textureTransform[2] = vec3(row1.b, row2.b, 1.0);
-
-		return textureTransform;
-
-	}
-
-	Material readMaterialInfo( sampler2D tex, uint index ) {
-
-		uint i = index * 45u;
-
-		vec4 s0 = texelFetch1D( tex, i + 0u );
-		vec4 s1 = texelFetch1D( tex, i + 1u );
-		vec4 s2 = texelFetch1D( tex, i + 2u );
-		vec4 s3 = texelFetch1D( tex, i + 3u );
-		vec4 s4 = texelFetch1D( tex, i + 4u );
-		vec4 s5 = texelFetch1D( tex, i + 5u );
-		vec4 s6 = texelFetch1D( tex, i + 6u );
-		vec4 s7 = texelFetch1D( tex, i + 7u );
-		vec4 s8 = texelFetch1D( tex, i + 8u );
-		vec4 s9 = texelFetch1D( tex, i + 9u );
-		vec4 s10 = texelFetch1D( tex, i + 10u );
-		vec4 s11 = texelFetch1D( tex, i + 11u );
-		vec4 s12 = texelFetch1D( tex, i + 12u );
-		vec4 s13 = texelFetch1D( tex, i + 13u );
-		vec4 s14 = texelFetch1D( tex, i + 14u );
-
-		Material m;
-		m.color = s0.rgb;
-		m.map = int( round( s0.a ) );
-
-		m.metalness = s1.r;
-		m.metalnessMap = int( round( s1.g ) );
-		m.roughness = s1.b;
-		m.roughnessMap = int( round( s1.a ) );
-
-		m.ior = s2.r;
-		m.transmission = s2.g;
-		m.transmissionMap = int( round( s2.b ) );
-		m.emissiveIntensity = s2.a;
-
-		m.emissive = s3.rgb;
-		m.emissiveMap = int( round( s3.a ) );
-
-		m.normalMap = int( round( s4.r ) );
-		m.normalScale = s4.gb;
-
-		m.clearcoat = s4.a;
-		m.clearcoatMap = int( round( s5.r ) );
-		m.clearcoatRoughness = s5.g;
-		m.clearcoatRoughnessMap = int( round( s5.b ) );
-		m.clearcoatNormalMap = int( round( s5.a ) );
-		m.clearcoatNormalScale = s6.rg;
-
-		m.sheen = s6.a;
-		m.sheenColor = s7.rgb;
-		m.sheenColorMap = int( round( s7.a ) );
-		m.sheenRoughness = s8.r;
-		m.sheenRoughnessMap = int( round( s8.g ) );
-
-		m.iridescenceMap = int( round( s8.b ) );
-		m.iridescenceThicknessMap = int( round( s8.a ) );
-		m.iridescence = s9.r;
-		m.iridescenceIor = s9.g;
-		m.iridescenceThicknessMinimum = s9.b;
-		m.iridescenceThicknessMaximum = s9.a;
-
-		m.specularColor = s10.rgb;
-		m.specularColorMap = int( round( s10.a ) );
-
-		m.specularIntensity = s11.r;
-		m.specularIntensityMap = int( round( s11.g ) );
-		m.thinFilm = bool( s11.b );
-
-		m.attenuationColor = s12.rgb;
-		m.attenuationDistance = s12.a;
-
-		m.alphaMap = int( round( s13.r ) );
-
-		m.opacity = s13.g;
-		m.alphaTest = s13.b;
-		m.side = s13.a;
-
-		m.matte = bool( s14.r );
-		m.castShadow = ! bool( s14.g );
-		m.vertexColors = bool( int( s14.b ) & 1 );
-		m.flatShading = bool( int( s14.b ) & 2 );
-		m.fogVolume = bool( int( s14.b ) & 4 );
-		m.transparent = bool( s14.a );
-
-		uint firstTextureTransformIdx = i + 15u;
-
-		m.mapTransform = m.map == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx );
-		m.metalnessMapTransform = m.metalnessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 2u );
-		m.roughnessMapTransform = m.roughnessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 4u );
-		m.transmissionMapTransform = m.transmissionMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 6u );
-		m.emissiveMapTransform = m.emissiveMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 8u );
-		m.normalMapTransform = m.normalMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 10u );
-		m.clearcoatMapTransform = m.clearcoatMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 12u );
-		m.clearcoatNormalMapTransform = m.clearcoatNormalMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 14u );
-		m.clearcoatRoughnessMapTransform = m.clearcoatRoughnessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 16u );
-		m.sheenColorMapTransform = m.sheenColorMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 18u );
-		m.sheenRoughnessMapTransform = m.sheenRoughnessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 20u );
-		m.iridescenceMapTransform = m.iridescenceMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 22u );
-		m.iridescenceThicknessMapTransform = m.iridescenceThicknessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 24u );
-		m.specularColorMapTransform = m.specularColorMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 26u );
-		m.specularIntensityMapTransform = m.specularIntensityMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 28u );
-
-		return m;
-
-	}
-
-`;
-
-	class DenoiseMaterial extends MaterialBase {
-
-		constructor( parameters ) {
-
-			super( {
-
-				blending: three.NoBlending,
-
-				transparent: false,
-
-				depthWrite: false,
-
-				depthTest: false,
-
-				defines: {
-
-					USE_SLIDER: 0,
-
-				},
-
-				uniforms: {
-
-					sigma: { value: 5.0 },
-					threshold: { value: 0.03 },
-					kSigma: { value: 1.0 },
-
-					map: { value: null },
-
-				},
-
-				vertexShader: /* glsl */`
-
-				varying vec2 vUv;
-
-				void main() {
-
-					vUv = uv;
-					gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
-
-				}
-
-			`,
-
-				fragmentShader: /* glsl */`
-
-				//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-				//  Copyright (c) 2018-2019 Michele Morrone
-				//  All rights reserved.
-				//
-				//  https://michelemorrone.eu - https://BrutPitt.com
-				//
-				//  me@michelemorrone.eu - brutpitt@gmail.com
-				//  twitter: @BrutPitt - github: BrutPitt
-				//
-				//  https://github.com/BrutPitt/glslSmartDeNoise/
-				//
-				//  This software is distributed under the terms of the BSD 2-Clause license
-				//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-				uniform sampler2D map;
-
-				uniform float sigma;
-				uniform float threshold;
-				uniform float kSigma;
-
-				varying vec2 vUv;
-
-				#define INV_SQRT_OF_2PI 0.39894228040143267793994605993439
-				#define INV_PI 0.31830988618379067153776752674503
-
-				// Parameters:
-				//	 sampler2D tex	 - sampler image / texture
-				//	 vec2 uv		   - actual fragment coord
-				//	 float sigma  >  0 - sigma Standard Deviation
-				//	 float kSigma >= 0 - sigma coefficient
-				//		 kSigma * sigma  -->  radius of the circular kernel
-				//	 float threshold   - edge sharpening threshold
-				vec4 smartDeNoise( sampler2D tex, vec2 uv, float sigma, float kSigma, float threshold ) {
-
-					float radius = round( kSigma * sigma );
-					float radQ = radius * radius;
-
-					float invSigmaQx2 = 0.5 / ( sigma * sigma );
-					float invSigmaQx2PI = INV_PI * invSigmaQx2;
-
-					float invThresholdSqx2 = 0.5 / ( threshold * threshold );
-					float invThresholdSqrt2PI = INV_SQRT_OF_2PI / threshold;
-
-					vec4 centrPx = texture2D( tex, uv );
-					centrPx.rgb *= centrPx.a;
-
-					float zBuff = 0.0;
-					vec4 aBuff = vec4( 0.0 );
-					vec2 size = vec2( textureSize( tex, 0 ) );
-
-					vec2 d;
-					for ( d.x = - radius; d.x <= radius; d.x ++ ) {
-
-						float pt = sqrt( radQ - d.x * d.x );
-
-						for ( d.y = - pt; d.y <= pt; d.y ++ ) {
-
-							float blurFactor = exp( - dot( d, d ) * invSigmaQx2 ) * invSigmaQx2PI;
-
-							vec4 walkPx = texture2D( tex, uv + d / size );
-							walkPx.rgb *= walkPx.a;
-
-							vec4 dC = walkPx - centrPx;
-							float deltaFactor = exp( - dot( dC.rgba, dC.rgba ) * invThresholdSqx2 ) * invThresholdSqrt2PI * blurFactor;
-
-							zBuff += deltaFactor;
-							aBuff += deltaFactor * walkPx;
-
-						}
-
-					}
-
-					return aBuff / zBuff;
-
-				}
-
-				void main() {
-
-					gl_FragColor = smartDeNoise( map, vec2( vUv.x, vUv.y ), sigma, kSigma, threshold );
-					#include <tonemapping_fragment>
-					#include <encodings_fragment>
-					#include <premultiplied_alpha_fragment>
-
-				}
-
-			`
-
-			} );
-
-			this.setValues( parameters );
-
-		}
-
-	}
-
-	class GradientMapMaterial extends MaterialBase {
-
-		constructor( parameters ) {
-
-			super( {
-
-				defines: {
-
-					FEATURE_BIN: 0,
-
-				},
-
-				uniforms: {
-
-					map: { value: null },
-
-					minColor: { value: new three.Color( 0 ) },
-					minValue: { value: 0 },
-
-					maxColor: { value: new three.Color( 0xffffff ) },
-					maxValue: { value: 10 },
-
-					field: { value: 0 },
-					power: { value: 1 },
-
-				},
-
-				blending: three.NoBlending,
-
-				vertexShader: /* glsl */`
-
-				varying vec2 vUv;
-
-				void main() {
-
-					vUv = uv;
-					gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
-
-				}`,
-
-				fragmentShader: /* glsl */`
-
-				uniform sampler2D map;
-				uniform vec3 minColor;
-				uniform float minValue;
-				uniform vec3 maxColor;
-				uniform float maxValue;
-				uniform int field;
-				uniform float power;
-
-				varying vec2 vUv;
-
-				void main() {
-
-					float value = texture( map, vUv )[ field ];
-
-					#if FEATURE_BIN
-
-					value = ceil( value );
-
-					#endif
-
-					float t = smoothstep( minValue, maxValue, value );
-					t = pow( t, power );
-
-					gl_FragColor.rgb = vec3( mix( minColor, maxColor, t ) );
-					gl_FragColor.a = 1.0;
-
-					#include <encodings_fragment>
-
-				}`,
-
-			} );
-
-			this.setValues( parameters );
-
-		}
-
-	}
-
-	class GraphMaterial extends MaterialBase {
-
-		get graphFunctionSnippet() {
-
-			return this._graphFunctionSnippet;
-
-		}
-
-		set graphFunctionSnippet( v ) {
-
-			this._graphFunctionSnippet = v;
-
-		}
-
-		constructor( parameters ) {
-
-			super( {
-
-				blending: three.NoBlending,
-
-				transparent: false,
-
-				depthWrite: false,
-
-				depthTest: false,
-
-				defines: {
-
-					USE_SLIDER: 0,
-
-				},
-
-				uniforms: {
-
-					dim: { value: true },
-					thickness: { value: 1 },
-					graphCount: { value: 4 },
-					graphDisplay: { value: new three.Vector4( 1.0, 1.0, 1.0, 1.0 ) },
-					overlay: { value: true },
-					xRange: { value: new three.Vector2( - 2.0, 2.0 ) },
-					yRange: { value: new three.Vector2( - 2.0, 2.0 ) },
-					colors: { value: [
-						new three.Color( 0xe91e63 ).convertSRGBToLinear(),
-						new three.Color( 0x4caf50 ).convertSRGBToLinear(),
-						new three.Color( 0x03a9f4 ).convertSRGBToLinear(),
-						new three.Color( 0xffc107 ).convertSRGBToLinear(),
-					] },
-
-				},
-
-				vertexShader: /* glsl */`
-
-				varying vec2 vUv;
-
-				void main() {
-
-					vUv = uv;
-					gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
-
-				}
-
-			`,
-
-				fragmentShader: /* glsl */`
-				varying vec2 vUv;
-				uniform bool overlay;
-				uniform bool dim;
-				uniform bvec4 graphDisplay;
-				uniform float graphCount;
-				uniform float thickness;
-				uniform vec2 xRange;
-				uniform vec2 yRange;
-				uniform vec3 colors[ 4 ];
-
-				__FUNCTION_CONTENT__
-
-				float map( float _min, float _max, float v ) {
-
-					float len = _max - _min;
-					return _min + len * v;
-
-				}
-
-				vec3 getBackground( vec2 point, float steepness ) {
-
-					vec2 pw = fwidth( point );
-					vec2 halfWidth = pw * 0.5;
-
-					// x, y axes
-					vec2 distToZero = smoothstep(
-						- halfWidth * 0.5,
-						halfWidth * 0.5,
-						abs( point.xy ) - pw
-					);
-
-					// 1 unit markers
-					vec2 temp;
-					vec2 modAxis = abs( modf( point + vec2( 0.5 ), temp ) ) - 0.5;
-					vec2 distToAxis = smoothstep(
-						- halfWidth,
-						halfWidth,
-						abs( modAxis.xy ) - pw * 0.5
-					);
-
-					// if we're at a chart boundary then remove the artifacts
-					if ( abs( pw.y ) > steepness * 0.5 ) {
-
-						distToZero.y = 1.0;
-						distToAxis.y = 1.0;
-
-					}
-
-					// mix colors into a background color
-					float axisIntensity = 1.0 - min( distToZero.x, distToZero.y );
-					float markerIntensity = 1.0 - min( distToAxis.x, distToAxis.y );
-
-					vec3 markerColor = mix( vec3( 0.005 ), vec3( 0.05 ), markerIntensity );
-					vec3 backgroundColor = mix( markerColor, vec3( 0.2 ), axisIntensity );
-					return backgroundColor;
-
-				}
-
-				void main() {
-
-					// from uniforms
-					float sectionCount = overlay ? 1.0 : graphCount;
-					float yWidth = abs( yRange.y - yRange.x );
-
-					// separate into sections
-					float _section;
-					float sectionY = modf( sectionCount * vUv.y, _section );
-					int section = int( sectionCount - _section - 1.0 );
-
-					// get the current point
-					vec2 point = vec2(
-						map( xRange.x, xRange.y, vUv.x ),
-						map( yRange.x, yRange.y, sectionY )
-					);
-
-					// get the results
-					vec4 result = graphFunction( point.x );
-					vec4 delta = result - vec4( point.y );
-					vec4 halfDdf = fwidth( delta ) * 0.5;
-					if ( fwidth( point.y ) > yWidth * 0.5 ) {
-
-						halfDdf = vec4( 0.0 );
-
-					}
-
-					// graph display intensity
-					vec4 graph = smoothstep( - halfDdf, halfDdf, abs( delta ) - thickness * halfDdf );
-
-					// initialize the background
-					gl_FragColor.rgb = getBackground( point, yWidth );
-					gl_FragColor.a = 1.0;
-
-					if ( dim && ( point.x < 0.0 || point.y < 0.0 ) ) {
-
-						graph = mix(
-							vec4( 1.0 ),
-							graph,
-							0.05
-						);
-
-					}
-
-					// color the charts
-					if ( sectionCount > 1.0 ) {
-
-						if ( graphDisplay[ section ] ) {
-
-							gl_FragColor.rgb = mix(
-								colors[ section ],
-								gl_FragColor.rgb,
-								graph[ section ]
-							);
-
-						}
-
-					} else {
-
-						for ( int i = 0; i < int( graphCount ); i ++ ) {
-
-							if ( graphDisplay[ i ] ) {
-
-								gl_FragColor.rgb = mix(
-									colors[ i ],
-									gl_FragColor.rgb,
-									graph[ i ]
-								);
-
-							}
-
-						}
-
-					}
-
-					#include <encodings_fragment>
-
-				}
-
-			`
-
-			} );
-
-
-			this._graphFunctionSnippet = /* glsl */`
-			vec4 graphFunctionSnippet( float x ) {
-
-				return vec4(
-					sin( x * 3.1415926535 ),
-					cos( x ),
-					0.0,
-					0.0
-				);
-
-			}
-		`;
-
-			this.setValues( parameters );
-
-		}
-
-		onBeforeCompile( shader ) {
-
-			shader.fragmentShader = shader.fragmentShader.replace(
-				'__FUNCTION_CONTENT__',
-				this._graphFunctionSnippet,
-			);
-			return shader;
-
-		}
-
-		customProgramCacheKey() {
-
-			return this._graphFunctionSnippet;
-
-		}
-
-	}
-
 	const ggxGLSL = /* glsl */`
 
 	// The GGX functions provide sampling and distribution information for normals as output so
@@ -6309,6 +5470,845 @@ bool bvhIntersectFogVolumeHit(
 	}
 
 `;
+
+	const cameraStructGLSL = /* glsl */`
+
+	struct PhysicalCamera {
+
+		float focusDistance;
+		float anamorphicRatio;
+		float bokehSize;
+		int apertureBlades;
+		float apertureRotation;
+
+	};
+
+`;
+
+	const equirectStructGLSL = /* glsl */`
+
+	struct EquirectHdrInfo {
+
+		sampler2D marginalWeights;
+		sampler2D conditionalWeights;
+		sampler2D map;
+
+		float totalSum;
+
+	};
+
+`;
+
+	const fogMaterialBvhGLSL = /* glsl */`
+
+#ifndef FOG_CHECK_ITERATIONS
+#define FOG_CHECK_ITERATIONS 30
+#endif
+
+// returns whether the given material is a fog material or not
+bool isMaterialFogVolume( sampler2D materials, uint materialIndex ) {
+
+	uint i = materialIndex * 45u;
+	vec4 s14 = texelFetch1D( materials, i + 14u );
+	return bool( int( s14.b ) & 4 );
+
+}
+
+// returns true if we're within the first fog volume we hit
+bool bvhIntersectFogVolumeHit(
+	BVH bvh, vec3 rayOrigin, vec3 rayDirection,
+	usampler2D materialIndexAttribute, sampler2D materials,
+	out Material material
+) {
+
+	material.fogVolume = false;
+
+	for ( int i = 0; i < FOG_CHECK_ITERATIONS; i ++ ) {
+
+		// find nearest hit
+		uvec4 faceIndices = uvec4( 0u );
+		vec3 faceNormal = vec3( 0.0, 0.0, 1.0 );
+		vec3 barycoord = vec3( 0.0 );
+		float side = 1.0;
+		float dist = 0.0;
+		bool hit = bvhIntersectFirstHit( bvh, rayOrigin, rayDirection, faceIndices, faceNormal, barycoord, side, dist );
+		if ( hit ) {
+
+			// if it's a fog volume return whether we hit the front or back face
+			uint materialIndex = uTexelFetch1D( materialIndexAttribute, faceIndices.x ).r;
+			if ( isMaterialFogVolume( materials, materialIndex ) ) {
+
+				material = readMaterialInfo( materials, materialIndex );
+				return side == - 1.0;
+
+			} else {
+
+				// move the ray forward
+				rayOrigin = stepRayOrigin( rayOrigin, rayDirection, - faceNormal, dist );
+
+			}
+
+		} else {
+
+			return false;
+
+		}
+
+	}
+
+	return false;
+
+}
+
+`;
+
+	const lightsStructGLSL = /* glsl */`
+
+	#define RECT_AREA_LIGHT_TYPE 0
+	#define CIRC_AREA_LIGHT_TYPE 1
+	#define SPOT_LIGHT_TYPE 2
+	#define DIR_LIGHT_TYPE 3
+	#define POINT_LIGHT_TYPE 4
+
+	struct LightsInfo {
+
+		sampler2D tex;
+		uint count;
+
+	};
+
+	struct Light {
+
+		vec3 position;
+		int type;
+
+		vec3 color;
+		float intensity;
+
+		vec3 u;
+		vec3 v;
+		float area;
+
+		// spot light fields
+		float radius;
+		float near;
+		float decay;
+		float distance;
+		float coneCos;
+		float penumbraCos;
+		int iesProfile;
+
+	};
+
+	Light readLightInfo( sampler2D tex, uint index ) {
+
+		uint i = index * 6u;
+
+		vec4 s0 = texelFetch1D( tex, i + 0u );
+		vec4 s1 = texelFetch1D( tex, i + 1u );
+		vec4 s2 = texelFetch1D( tex, i + 2u );
+		vec4 s3 = texelFetch1D( tex, i + 3u );
+
+		Light l;
+		l.position = s0.rgb;
+		l.type = int( round( s0.a ) );
+
+		l.color = s1.rgb;
+		l.intensity = s1.a;
+
+		l.u = s2.rgb;
+		l.v = s3.rgb;
+		l.area = s3.a;
+
+		if ( l.type == SPOT_LIGHT_TYPE || l.type == POINT_LIGHT_TYPE ) {
+
+			vec4 s4 = texelFetch1D( tex, i + 4u );
+			vec4 s5 = texelFetch1D( tex, i + 5u );
+			l.radius = s4.r;
+			l.near = s4.g;
+			l.decay = s4.b;
+			l.distance = s4.a;
+
+			l.coneCos = s5.r;
+			l.penumbraCos = s5.g;
+			l.iesProfile = int( round ( s5.b ) );
+
+		}
+
+		return l;
+
+	}
+
+`;
+
+	const materialStructGLSL = /* glsl */ `
+
+	struct Material {
+
+		vec3 color;
+		int map;
+
+		float metalness;
+		int metalnessMap;
+
+		float roughness;
+		int roughnessMap;
+
+		float ior;
+		float transmission;
+		int transmissionMap;
+
+		float emissiveIntensity;
+		vec3 emissive;
+		int emissiveMap;
+
+		int normalMap;
+		vec2 normalScale;
+
+		float clearcoat;
+		int clearcoatMap;
+		int clearcoatNormalMap;
+		vec2 clearcoatNormalScale;
+		float clearcoatRoughness;
+		int clearcoatRoughnessMap;
+
+		int iridescenceMap;
+		int iridescenceThicknessMap;
+		float iridescence;
+		float iridescenceIor;
+		float iridescenceThicknessMinimum;
+		float iridescenceThicknessMaximum;
+
+		vec3 specularColor;
+		int specularColorMap;
+
+		float specularIntensity;
+		int specularIntensityMap;
+		bool thinFilm;
+
+		vec3 attenuationColor;
+		float attenuationDistance;
+
+		int alphaMap;
+
+		bool castShadow;
+		float opacity;
+		float alphaTest;
+
+		float side;
+		bool matte;
+
+		float sheen;
+		vec3 sheenColor;
+		int sheenColorMap;
+		float sheenRoughness;
+		int sheenRoughnessMap;
+
+		bool vertexColors;
+		bool flatShading;
+		bool transparent;
+		bool fogVolume;
+
+		mat3 mapTransform;
+		mat3 metalnessMapTransform;
+		mat3 roughnessMapTransform;
+		mat3 transmissionMapTransform;
+		mat3 emissiveMapTransform;
+		mat3 normalMapTransform;
+		mat3 clearcoatMapTransform;
+		mat3 clearcoatNormalMapTransform;
+		mat3 clearcoatRoughnessMapTransform;
+		mat3 sheenColorMapTransform;
+		mat3 sheenRoughnessMapTransform;
+		mat3 iridescenceMapTransform;
+		mat3 iridescenceThicknessMapTransform;
+		mat3 specularColorMapTransform;
+		mat3 specularIntensityMapTransform;
+
+	};
+
+	mat3 readTextureTransform( sampler2D tex, uint index ) {
+
+		mat3 textureTransform;
+
+		vec4 row1 = texelFetch1D( tex, index );
+		vec4 row2 = texelFetch1D( tex, index + 1u );
+
+		textureTransform[0] = vec3(row1.r, row2.r, 0.0);
+		textureTransform[1] = vec3(row1.g, row2.g, 0.0);
+		textureTransform[2] = vec3(row1.b, row2.b, 1.0);
+
+		return textureTransform;
+
+	}
+
+	Material readMaterialInfo( sampler2D tex, uint index ) {
+
+		uint i = index * 45u;
+
+		vec4 s0 = texelFetch1D( tex, i + 0u );
+		vec4 s1 = texelFetch1D( tex, i + 1u );
+		vec4 s2 = texelFetch1D( tex, i + 2u );
+		vec4 s3 = texelFetch1D( tex, i + 3u );
+		vec4 s4 = texelFetch1D( tex, i + 4u );
+		vec4 s5 = texelFetch1D( tex, i + 5u );
+		vec4 s6 = texelFetch1D( tex, i + 6u );
+		vec4 s7 = texelFetch1D( tex, i + 7u );
+		vec4 s8 = texelFetch1D( tex, i + 8u );
+		vec4 s9 = texelFetch1D( tex, i + 9u );
+		vec4 s10 = texelFetch1D( tex, i + 10u );
+		vec4 s11 = texelFetch1D( tex, i + 11u );
+		vec4 s12 = texelFetch1D( tex, i + 12u );
+		vec4 s13 = texelFetch1D( tex, i + 13u );
+		vec4 s14 = texelFetch1D( tex, i + 14u );
+
+		Material m;
+		m.color = s0.rgb;
+		m.map = int( round( s0.a ) );
+
+		m.metalness = s1.r;
+		m.metalnessMap = int( round( s1.g ) );
+		m.roughness = s1.b;
+		m.roughnessMap = int( round( s1.a ) );
+
+		m.ior = s2.r;
+		m.transmission = s2.g;
+		m.transmissionMap = int( round( s2.b ) );
+		m.emissiveIntensity = s2.a;
+
+		m.emissive = s3.rgb;
+		m.emissiveMap = int( round( s3.a ) );
+
+		m.normalMap = int( round( s4.r ) );
+		m.normalScale = s4.gb;
+
+		m.clearcoat = s4.a;
+		m.clearcoatMap = int( round( s5.r ) );
+		m.clearcoatRoughness = s5.g;
+		m.clearcoatRoughnessMap = int( round( s5.b ) );
+		m.clearcoatNormalMap = int( round( s5.a ) );
+		m.clearcoatNormalScale = s6.rg;
+
+		m.sheen = s6.a;
+		m.sheenColor = s7.rgb;
+		m.sheenColorMap = int( round( s7.a ) );
+		m.sheenRoughness = s8.r;
+		m.sheenRoughnessMap = int( round( s8.g ) );
+
+		m.iridescenceMap = int( round( s8.b ) );
+		m.iridescenceThicknessMap = int( round( s8.a ) );
+		m.iridescence = s9.r;
+		m.iridescenceIor = s9.g;
+		m.iridescenceThicknessMinimum = s9.b;
+		m.iridescenceThicknessMaximum = s9.a;
+
+		m.specularColor = s10.rgb;
+		m.specularColorMap = int( round( s10.a ) );
+
+		m.specularIntensity = s11.r;
+		m.specularIntensityMap = int( round( s11.g ) );
+		m.thinFilm = bool( s11.b );
+
+		m.attenuationColor = s12.rgb;
+		m.attenuationDistance = s12.a;
+
+		m.alphaMap = int( round( s13.r ) );
+
+		m.opacity = s13.g;
+		m.alphaTest = s13.b;
+		m.side = s13.a;
+
+		m.matte = bool( s14.r );
+		m.castShadow = ! bool( s14.g );
+		m.vertexColors = bool( int( s14.b ) & 1 );
+		m.flatShading = bool( int( s14.b ) & 2 );
+		m.fogVolume = bool( int( s14.b ) & 4 );
+		m.transparent = bool( s14.a );
+
+		uint firstTextureTransformIdx = i + 15u;
+
+		m.mapTransform = m.map == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx );
+		m.metalnessMapTransform = m.metalnessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 2u );
+		m.roughnessMapTransform = m.roughnessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 4u );
+		m.transmissionMapTransform = m.transmissionMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 6u );
+		m.emissiveMapTransform = m.emissiveMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 8u );
+		m.normalMapTransform = m.normalMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 10u );
+		m.clearcoatMapTransform = m.clearcoatMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 12u );
+		m.clearcoatNormalMapTransform = m.clearcoatNormalMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 14u );
+		m.clearcoatRoughnessMapTransform = m.clearcoatRoughnessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 16u );
+		m.sheenColorMapTransform = m.sheenColorMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 18u );
+		m.sheenRoughnessMapTransform = m.sheenRoughnessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 20u );
+		m.iridescenceMapTransform = m.iridescenceMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 22u );
+		m.iridescenceThicknessMapTransform = m.iridescenceThicknessMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 24u );
+		m.specularColorMapTransform = m.specularColorMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 26u );
+		m.specularIntensityMapTransform = m.specularIntensityMap == - 1 ? mat3( 0 ) : readTextureTransform( tex, firstTextureTransformIdx + 28u );
+
+		return m;
+
+	}
+
+`;
+
+	class DenoiseMaterial extends MaterialBase {
+
+		constructor( parameters ) {
+
+			super( {
+
+				blending: three.NoBlending,
+
+				transparent: false,
+
+				depthWrite: false,
+
+				depthTest: false,
+
+				defines: {
+
+					USE_SLIDER: 0,
+
+				},
+
+				uniforms: {
+
+					sigma: { value: 5.0 },
+					threshold: { value: 0.03 },
+					kSigma: { value: 1.0 },
+
+					map: { value: null },
+
+				},
+
+				vertexShader: /* glsl */`
+
+				varying vec2 vUv;
+
+				void main() {
+
+					vUv = uv;
+					gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+
+				}
+
+			`,
+
+				fragmentShader: /* glsl */`
+
+				//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+				//  Copyright (c) 2018-2019 Michele Morrone
+				//  All rights reserved.
+				//
+				//  https://michelemorrone.eu - https://BrutPitt.com
+				//
+				//  me@michelemorrone.eu - brutpitt@gmail.com
+				//  twitter: @BrutPitt - github: BrutPitt
+				//
+				//  https://github.com/BrutPitt/glslSmartDeNoise/
+				//
+				//  This software is distributed under the terms of the BSD 2-Clause license
+				//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+				uniform sampler2D map;
+
+				uniform float sigma;
+				uniform float threshold;
+				uniform float kSigma;
+
+				varying vec2 vUv;
+
+				#define INV_SQRT_OF_2PI 0.39894228040143267793994605993439
+				#define INV_PI 0.31830988618379067153776752674503
+
+				// Parameters:
+				//	 sampler2D tex	 - sampler image / texture
+				//	 vec2 uv		   - actual fragment coord
+				//	 float sigma  >  0 - sigma Standard Deviation
+				//	 float kSigma >= 0 - sigma coefficient
+				//		 kSigma * sigma  -->  radius of the circular kernel
+				//	 float threshold   - edge sharpening threshold
+				vec4 smartDeNoise( sampler2D tex, vec2 uv, float sigma, float kSigma, float threshold ) {
+
+					float radius = round( kSigma * sigma );
+					float radQ = radius * radius;
+
+					float invSigmaQx2 = 0.5 / ( sigma * sigma );
+					float invSigmaQx2PI = INV_PI * invSigmaQx2;
+
+					float invThresholdSqx2 = 0.5 / ( threshold * threshold );
+					float invThresholdSqrt2PI = INV_SQRT_OF_2PI / threshold;
+
+					vec4 centrPx = texture2D( tex, uv );
+					centrPx.rgb *= centrPx.a;
+
+					float zBuff = 0.0;
+					vec4 aBuff = vec4( 0.0 );
+					vec2 size = vec2( textureSize( tex, 0 ) );
+
+					vec2 d;
+					for ( d.x = - radius; d.x <= radius; d.x ++ ) {
+
+						float pt = sqrt( radQ - d.x * d.x );
+
+						for ( d.y = - pt; d.y <= pt; d.y ++ ) {
+
+							float blurFactor = exp( - dot( d, d ) * invSigmaQx2 ) * invSigmaQx2PI;
+
+							vec4 walkPx = texture2D( tex, uv + d / size );
+							walkPx.rgb *= walkPx.a;
+
+							vec4 dC = walkPx - centrPx;
+							float deltaFactor = exp( - dot( dC.rgba, dC.rgba ) * invThresholdSqx2 ) * invThresholdSqrt2PI * blurFactor;
+
+							zBuff += deltaFactor;
+							aBuff += deltaFactor * walkPx;
+
+						}
+
+					}
+
+					return aBuff / zBuff;
+
+				}
+
+				void main() {
+
+					gl_FragColor = smartDeNoise( map, vec2( vUv.x, vUv.y ), sigma, kSigma, threshold );
+					#include <tonemapping_fragment>
+					#include <encodings_fragment>
+					#include <premultiplied_alpha_fragment>
+
+				}
+
+			`
+
+			} );
+
+			this.setValues( parameters );
+
+		}
+
+	}
+
+	class GradientMapMaterial extends MaterialBase {
+
+		constructor( parameters ) {
+
+			super( {
+
+				defines: {
+
+					FEATURE_BIN: 0,
+
+				},
+
+				uniforms: {
+
+					map: { value: null },
+
+					minColor: { value: new three.Color( 0 ) },
+					minValue: { value: 0 },
+
+					maxColor: { value: new three.Color( 0xffffff ) },
+					maxValue: { value: 10 },
+
+					field: { value: 0 },
+					power: { value: 1 },
+
+				},
+
+				blending: three.NoBlending,
+
+				vertexShader: /* glsl */`
+
+				varying vec2 vUv;
+
+				void main() {
+
+					vUv = uv;
+					gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+
+				}`,
+
+				fragmentShader: /* glsl */`
+
+				uniform sampler2D map;
+				uniform vec3 minColor;
+				uniform float minValue;
+				uniform vec3 maxColor;
+				uniform float maxValue;
+				uniform int field;
+				uniform float power;
+
+				varying vec2 vUv;
+
+				void main() {
+
+					float value = texture( map, vUv )[ field ];
+
+					#if FEATURE_BIN
+
+					value = ceil( value );
+
+					#endif
+
+					float t = smoothstep( minValue, maxValue, value );
+					t = pow( t, power );
+
+					gl_FragColor.rgb = vec3( mix( minColor, maxColor, t ) );
+					gl_FragColor.a = 1.0;
+
+					#include <encodings_fragment>
+
+				}`,
+
+			} );
+
+			this.setValues( parameters );
+
+		}
+
+	}
+
+	class GraphMaterial extends MaterialBase {
+
+		get graphFunctionSnippet() {
+
+			return this._graphFunctionSnippet;
+
+		}
+
+		set graphFunctionSnippet( v ) {
+
+			this._graphFunctionSnippet = v;
+
+		}
+
+		constructor( parameters ) {
+
+			super( {
+
+				blending: three.NoBlending,
+
+				transparent: false,
+
+				depthWrite: false,
+
+				depthTest: false,
+
+				defines: {
+
+					USE_SLIDER: 0,
+
+				},
+
+				uniforms: {
+
+					dim: { value: true },
+					thickness: { value: 1 },
+					graphCount: { value: 4 },
+					graphDisplay: { value: new three.Vector4( 1.0, 1.0, 1.0, 1.0 ) },
+					overlay: { value: true },
+					xRange: { value: new three.Vector2( - 2.0, 2.0 ) },
+					yRange: { value: new three.Vector2( - 2.0, 2.0 ) },
+					colors: { value: [
+						new three.Color( 0xe91e63 ).convertSRGBToLinear(),
+						new three.Color( 0x4caf50 ).convertSRGBToLinear(),
+						new three.Color( 0x03a9f4 ).convertSRGBToLinear(),
+						new three.Color( 0xffc107 ).convertSRGBToLinear(),
+					] },
+
+				},
+
+				vertexShader: /* glsl */`
+
+				varying vec2 vUv;
+
+				void main() {
+
+					vUv = uv;
+					gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+
+				}
+
+			`,
+
+				fragmentShader: /* glsl */`
+				varying vec2 vUv;
+				uniform bool overlay;
+				uniform bool dim;
+				uniform bvec4 graphDisplay;
+				uniform float graphCount;
+				uniform float thickness;
+				uniform vec2 xRange;
+				uniform vec2 yRange;
+				uniform vec3 colors[ 4 ];
+
+				__FUNCTION_CONTENT__
+
+				float map( float _min, float _max, float v ) {
+
+					float len = _max - _min;
+					return _min + len * v;
+
+				}
+
+				vec3 getBackground( vec2 point, float steepness ) {
+
+					vec2 pw = fwidth( point );
+					vec2 halfWidth = pw * 0.5;
+
+					// x, y axes
+					vec2 distToZero = smoothstep(
+						- halfWidth * 0.5,
+						halfWidth * 0.5,
+						abs( point.xy ) - pw
+					);
+
+					// 1 unit markers
+					vec2 temp;
+					vec2 modAxis = abs( modf( point + vec2( 0.5 ), temp ) ) - 0.5;
+					vec2 distToAxis = smoothstep(
+						- halfWidth,
+						halfWidth,
+						abs( modAxis.xy ) - pw * 0.5
+					);
+
+					// if we're at a chart boundary then remove the artifacts
+					if ( abs( pw.y ) > steepness * 0.5 ) {
+
+						distToZero.y = 1.0;
+						distToAxis.y = 1.0;
+
+					}
+
+					// mix colors into a background color
+					float axisIntensity = 1.0 - min( distToZero.x, distToZero.y );
+					float markerIntensity = 1.0 - min( distToAxis.x, distToAxis.y );
+
+					vec3 markerColor = mix( vec3( 0.005 ), vec3( 0.05 ), markerIntensity );
+					vec3 backgroundColor = mix( markerColor, vec3( 0.2 ), axisIntensity );
+					return backgroundColor;
+
+				}
+
+				void main() {
+
+					// from uniforms
+					float sectionCount = overlay ? 1.0 : graphCount;
+					float yWidth = abs( yRange.y - yRange.x );
+
+					// separate into sections
+					float _section;
+					float sectionY = modf( sectionCount * vUv.y, _section );
+					int section = int( sectionCount - _section - 1.0 );
+
+					// get the current point
+					vec2 point = vec2(
+						map( xRange.x, xRange.y, vUv.x ),
+						map( yRange.x, yRange.y, sectionY )
+					);
+
+					// get the results
+					vec4 result = graphFunction( point.x );
+					vec4 delta = result - vec4( point.y );
+					vec4 halfDdf = fwidth( delta ) * 0.5;
+					if ( fwidth( point.y ) > yWidth * 0.5 ) {
+
+						halfDdf = vec4( 0.0 );
+
+					}
+
+					// graph display intensity
+					vec4 graph = smoothstep( - halfDdf, halfDdf, abs( delta ) - thickness * halfDdf );
+
+					// initialize the background
+					gl_FragColor.rgb = getBackground( point, yWidth );
+					gl_FragColor.a = 1.0;
+
+					if ( dim && ( point.x < 0.0 || point.y < 0.0 ) ) {
+
+						graph = mix(
+							vec4( 1.0 ),
+							graph,
+							0.05
+						);
+
+					}
+
+					// color the charts
+					if ( sectionCount > 1.0 ) {
+
+						if ( graphDisplay[ section ] ) {
+
+							gl_FragColor.rgb = mix(
+								colors[ section ],
+								gl_FragColor.rgb,
+								graph[ section ]
+							);
+
+						}
+
+					} else {
+
+						for ( int i = 0; i < int( graphCount ); i ++ ) {
+
+							if ( graphDisplay[ i ] ) {
+
+								gl_FragColor.rgb = mix(
+									colors[ i ],
+									gl_FragColor.rgb,
+									graph[ i ]
+								);
+
+							}
+
+						}
+
+					}
+
+					#include <encodings_fragment>
+
+				}
+
+			`
+
+			} );
+
+
+			this._graphFunctionSnippet = /* glsl */`
+			vec4 graphFunctionSnippet( float x ) {
+
+				return vec4(
+					sin( x * 3.1415926535 ),
+					cos( x ),
+					0.0,
+					0.0
+				);
+
+			}
+		`;
+
+			this.setValues( parameters );
+
+		}
+
+		onBeforeCompile( shader ) {
+
+			shader.fragmentShader = shader.fragmentShader.replace(
+				'__FUNCTION_CONTENT__',
+				this._graphFunctionSnippet,
+			);
+			return shader;
+
+		}
+
+		customProgramCacheKey() {
+
+			return this._graphFunctionSnippet;
+
+		}
+
+	}
 
 	const renderStructsGLSL = /* glsl */`
 
@@ -7979,14 +7979,18 @@ bool bvhIntersectFogVolumeHit(
 	exports.RenderTarget2DArray = RenderTarget2DArray;
 	exports.ShapedAreaLight = ShapedAreaLight;
 	exports.arraySamplerTexelFetchGLSL = arraySamplerTexelFetchGLSL;
+	exports.bsdfSamplingGLSL = bsdfSamplingGLSL;
 	exports.bvhAnyHitGLSL = bvhAnyHitGLSL;
 	exports.cameraStructGLSL = cameraStructGLSL;
 	exports.equirectSamplingGLSL = equirectSamplingGLSL;
 	exports.equirectStructGLSL = equirectStructGLSL;
+	exports.fogGLSL = fogGLSL;
 	exports.fogMaterialBvhGLSL = fogMaterialBvhGLSL;
 	exports.fresnelGLSL = fresnelGLSL;
 	exports.getGroupMaterialIndicesAttribute = getGroupMaterialIndicesAttribute;
+	exports.ggxGLSL = ggxGLSL;
 	exports.intersectShapesGLSL = intersectShapesGLSL;
+	exports.iridescenceGLSL = iridescenceGLSL;
 	exports.lightSamplingGLSL = lightSamplingGLSL;
 	exports.lightsStructGLSL = lightsStructGLSL;
 	exports.materialStructGLSL = materialStructGLSL;
@@ -7995,6 +7999,7 @@ bool bvhIntersectFogVolumeHit(
 	exports.pcgGLSL = pcgGLSL;
 	exports.setCommonAttributes = setCommonAttributes;
 	exports.shapeSamplingGLSL = shapeSamplingGLSL;
+	exports.sheenGLSL = sheenGLSL;
 	exports.sobolCommonGLSL = sobolCommonGLSL;
 	exports.sobolGenerationGLSL = sobolGenerationGLSL;
 	exports.sobolSamplingGLSL = sobolSamplingGLSL;
