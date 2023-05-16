@@ -7979,15 +7979,19 @@ bool bvhIntersectFogVolumeHit(
 	exports.RenderTarget2DArray = RenderTarget2DArray;
 	exports.ShapedAreaLight = ShapedAreaLight;
 	exports.arraySamplerTexelFetchGLSL = arraySamplerTexelFetchGLSL;
+	exports.attenuateHitGLSL = attenuateHitGLSL;
 	exports.bsdfSamplingGLSL = bsdfSamplingGLSL;
 	exports.bvhAnyHitGLSL = bvhAnyHitGLSL;
 	exports.cameraStructGLSL = cameraStructGLSL;
+	exports.cameraUtilsGLSL = cameraUtilsGLSL;
+	exports.directLightContributionGLSL = directLightContributionGLSL;
 	exports.equirectSamplingGLSL = equirectSamplingGLSL;
 	exports.equirectStructGLSL = equirectStructGLSL;
 	exports.fogGLSL = fogGLSL;
 	exports.fogMaterialBvhGLSL = fogMaterialBvhGLSL;
 	exports.fresnelGLSL = fresnelGLSL;
 	exports.getGroupMaterialIndicesAttribute = getGroupMaterialIndicesAttribute;
+	exports.getSurfaceRecordGLSL = getSurfaceRecordGLSL;
 	exports.ggxGLSL = ggxGLSL;
 	exports.intersectShapesGLSL = intersectShapesGLSL;
 	exports.iridescenceGLSL = iridescenceGLSL;
@@ -7997,12 +8001,14 @@ bool bvhIntersectFogVolumeHit(
 	exports.mathGLSL = mathGLSL;
 	exports.mergeMeshes = mergeMeshes;
 	exports.pcgGLSL = pcgGLSL;
+	exports.renderStructsGLSL = renderStructsGLSL;
 	exports.setCommonAttributes = setCommonAttributes;
 	exports.shapeSamplingGLSL = shapeSamplingGLSL;
 	exports.sheenGLSL = sheenGLSL;
 	exports.sobolCommonGLSL = sobolCommonGLSL;
 	exports.sobolGenerationGLSL = sobolGenerationGLSL;
 	exports.sobolSamplingGLSL = sobolSamplingGLSL;
+	exports.traceSceneGLSL = traceSceneGLSL;
 	exports.trimToAttributes = trimToAttributes;
 	exports.utilsGLSL = utilsGLSL;
 

@@ -67,5 +67,13 @@ export * from './materials/MaterialBase.js';
 export * from './materials/pathtracing/PhysicalPathTracingMaterial.js';
 export * from './materials/surface/FogVolumeMaterial.js';
 
+// material glsl
+export * from './materials/pathtracing/glsl/attenuateHit.glsl.js';
+export * from './materials/pathtracing/glsl/cameraUtils.glsl.js';
+export * from './materials/pathtracing/glsl/directLightContribution.glsl.js';
+export * from './materials/pathtracing/glsl/getSurfaceRecord.glsl.js';
+export * from './materials/pathtracing/glsl/renderStructs.glsl.js';
+export * from './materials/pathtracing/glsl/traceScene.glsl.js';
+
 // detectors
 export * from './detectors/CompatibilityDetector.js';
