@@ -37,6 +37,8 @@ export * from './shader/common/arraySamplerTexelFetch.glsl.js';
 export * from './shader/common/fresnel.glsl.js';
 export * from './shader/common/utils.glsl.js';
 export * from './shader/common/math.glsl.js';
+export * from './shader/common/intersectShapes.glsl.js';
+export * from './shader/common/bvhAnyHit.glsl.js';
 
 // shader sampling
 export * from './shader/sampling/equirectSampling.glsl.js';

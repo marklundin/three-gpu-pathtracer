@@ -4100,6 +4100,146 @@
 
 `;
 
+	const intersectShapesGLSL = /* glsl */`
+
+	// Finds the point where the ray intersects the plane defined by u and v and checks if this point
+	// falls in the bounds of the rectangle on that same plane.
+	// Plane intersection: https://lousodrome.net/blog/light/2020/07/03/intersection-of-a-ray-and-a-plane/
+	bool intersectsRectangle( vec3 center, vec3 normal, vec3 u, vec3 v, vec3 rayOrigin, vec3 rayDirection, out float dist ) {
+
+		float t = dot( center - rayOrigin, normal ) / dot( rayDirection, normal );
+
+		if ( t > EPSILON ) {
+
+			vec3 p = rayOrigin + rayDirection * t;
+			vec3 vi = p - center;
+
+			// check if p falls inside the rectangle
+			float a1 = dot( u, vi );
+			if ( abs( a1 ) <= 0.5 ) {
+
+				float a2 = dot( v, vi );
+				if ( abs( a2 ) <= 0.5 ) {
+
+					dist = t;
+					return true;
+
+				}
+
+			}
+
+		}
+
+		return false;
+
+	}
+
+	// Finds the point where the ray intersects the plane defined by u and v and checks if this point
+	// falls in the bounds of the circle on that same plane. See above URL for a description of the plane intersection algorithm.
+	bool intersectsCircle( vec3 position, vec3 normal, vec3 u, vec3 v, vec3 rayOrigin, vec3 rayDirection, out float dist ) {
+
+		float t = dot( position - rayOrigin, normal ) / dot( rayDirection, normal );
+
+		if ( t > EPSILON ) {
+
+			vec3 hit = rayOrigin + rayDirection * t;
+			vec3 vi = hit - position;
+
+			float a1 = dot( u, vi );
+			float a2 = dot( v, vi );
+
+			if( length( vec2( a1, a2 ) ) <= 0.5 ) {
+
+				dist = t;
+				return true;
+
+			}
+
+		}
+
+		return false;
+
+	}
+
+`;
+
+	const bvhAnyHitGLSL = /* glsl */`
+
+	bool bvhIntersectAnyHit(
+		BVH bvh, vec3 rayOrigin, vec3 rayDirection,
+
+		// output variables
+		out float side, out float dist
+	) {
+
+		uvec4 faceIndices;
+		vec3 faceNormal;
+		vec3 barycoord;
+
+		// stack needs to be twice as long as the deepest tree we expect because
+		// we push both the left and right child onto the stack every traversal
+		int ptr = 0;
+		uint stack[ 60 ];
+		stack[ 0 ] = 0u;
+
+		float triangleDistance = 1e20;
+		while ( ptr > - 1 && ptr < 60 ) {
+
+			uint currNodeIndex = stack[ ptr ];
+			ptr --;
+
+			// check if we intersect the current bounds
+			float boundsHitDistance = intersectsBVHNodeBounds( rayOrigin, rayDirection, bvh, currNodeIndex );
+			if ( boundsHitDistance == INFINITY ) {
+
+				continue;
+
+			}
+
+			uvec2 boundsInfo = uTexelFetch1D( bvh.bvhContents, currNodeIndex ).xy;
+			bool isLeaf = bool( boundsInfo.x & 0xffff0000u );
+
+			if ( isLeaf ) {
+
+				uint count = boundsInfo.x & 0x0000ffffu;
+				uint offset = boundsInfo.y;
+
+				bool found = intersectTriangles(
+					bvh, rayOrigin, rayDirection, offset, count, triangleDistance,
+					faceIndices, faceNormal, barycoord, side, dist
+				);
+
+				if ( found ) {
+
+					return true;
+
+				}
+
+			} else {
+
+				uint leftIndex = currNodeIndex + 1u;
+				uint splitAxis = boundsInfo.x & 0x0000ffffu;
+				uint rightIndex = boundsInfo.y;
+
+				// set c2 in the stack so we traverse it later. We need to keep track of a pointer in
+				// the stack while we traverse. The second pointer added is the one that will be
+				// traversed first
+				ptr ++;
+				stack[ ptr ] = leftIndex;
+
+				ptr ++;
+				stack[ ptr ] = rightIndex;
+
+			}
+
+		}
+
+		return false;
+
+	}
+
+`;
+
 	const equirectSamplingGLSL = /* glsl */`
 
 	// samples the the given environment map in the given direction
@@ -6170,69 +6310,6 @@ bool bvhIntersectFogVolumeHit(
 
 `;
 
-	const intersectShapesGLSL = /* glsl */`
-
-	// Finds the point where the ray intersects the plane defined by u and v and checks if this point
-	// falls in the bounds of the rectangle on that same plane.
-	// Plane intersection: https://lousodrome.net/blog/light/2020/07/03/intersection-of-a-ray-and-a-plane/
-	bool intersectsRectangle( vec3 center, vec3 normal, vec3 u, vec3 v, vec3 rayOrigin, vec3 rayDirection, out float dist ) {
-
-		float t = dot( center - rayOrigin, normal ) / dot( rayDirection, normal );
-
-		if ( t > EPSILON ) {
-
-			vec3 p = rayOrigin + rayDirection * t;
-			vec3 vi = p - center;
-
-			// check if p falls inside the rectangle
-			float a1 = dot( u, vi );
-			if ( abs( a1 ) <= 0.5 ) {
-
-				float a2 = dot( v, vi );
-				if ( abs( a2 ) <= 0.5 ) {
-
-					dist = t;
-					return true;
-
-				}
-
-			}
-
-		}
-
-		return false;
-
-	}
-
-	// Finds the point where the ray intersects the plane defined by u and v and checks if this point
-	// falls in the bounds of the circle on that same plane. See above URL for a description of the plane intersection algorithm.
-	bool intersectsCircle( vec3 position, vec3 normal, vec3 u, vec3 v, vec3 rayOrigin, vec3 rayDirection, out float dist ) {
-
-		float t = dot( position - rayOrigin, normal ) / dot( rayDirection, normal );
-
-		if ( t > EPSILON ) {
-
-			vec3 hit = rayOrigin + rayDirection * t;
-			vec3 vi = hit - position;
-
-			float a1 = dot( u, vi );
-			float a2 = dot( v, vi );
-
-			if( length( vec2( a1, a2 ) ) <= 0.5 ) {
-
-				dist = t;
-				return true;
-
-			}
-
-		}
-
-		return false;
-
-	}
-
-`;
-
 	const renderStructsGLSL = /* glsl */`
 
 	struct Ray {
@@ -7902,12 +7979,14 @@ bool bvhIntersectFogVolumeHit(
 	exports.RenderTarget2DArray = RenderTarget2DArray;
 	exports.ShapedAreaLight = ShapedAreaLight;
 	exports.arraySamplerTexelFetchGLSL = arraySamplerTexelFetchGLSL;
+	exports.bvhAnyHitGLSL = bvhAnyHitGLSL;
 	exports.cameraStructGLSL = cameraStructGLSL;
 	exports.equirectSamplingGLSL = equirectSamplingGLSL;
 	exports.equirectStructGLSL = equirectStructGLSL;
 	exports.fogMaterialBvhGLSL = fogMaterialBvhGLSL;
 	exports.fresnelGLSL = fresnelGLSL;
 	exports.getGroupMaterialIndicesAttribute = getGroupMaterialIndicesAttribute;
+	exports.intersectShapesGLSL = intersectShapesGLSL;
 	exports.lightSamplingGLSL = lightSamplingGLSL;
 	exports.lightsStructGLSL = lightsStructGLSL;
 	exports.materialStructGLSL = materialStructGLSL;
