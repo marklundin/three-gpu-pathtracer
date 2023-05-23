@@ -58,6 +58,8 @@ export * from './shader/structs/fogMaterialBvh.glsl.js';
 export * from './shader/structs/lightsStruct.glsl.js';
 export * from './shader/structs/materialStruct.glsl.js';
 
+export * from './utils/SobolNumberMapGenerator.js'
+
 
 // materials
 export * from './materials/fullscreen/DenoiseMaterial.js';

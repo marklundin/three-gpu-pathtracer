@@ -7978,6 +7978,7 @@ bool bvhIntersectFogVolumeHit(
 	exports.QuiltPathTracingRenderer = QuiltPathTracingRenderer;
 	exports.RenderTarget2DArray = RenderTarget2DArray;
 	exports.ShapedAreaLight = ShapedAreaLight;
+	exports.SobolNumberMapGenerator = SobolNumberMapGenerator;
 	exports.arraySamplerTexelFetchGLSL = arraySamplerTexelFetchGLSL;
 	exports.attenuateHitGLSL = attenuateHitGLSL;
 	exports.bsdfSamplingGLSL = bsdfSamplingGLSL;
