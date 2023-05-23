@@ -29,6 +29,7 @@ export * from './uniforms/IESProfilesTexture.js';
 export * from './utils/GeometryPreparationUtils.js';
 export * from './utils/BlurredEnvMapGenerator.js';
 export * from './utils/IESLoader.js';
+export * from './utils/SobolNumberMapGenerator.js'
 
 // shader
 export * from './shader/rand/pcg.glsl.js';
@@ -57,8 +58,6 @@ export * from './shader/structs/equirectStruct.glsl.js';
 export * from './shader/structs/fogMaterialBvh.glsl.js';
 export * from './shader/structs/lightsStruct.glsl.js';
 export * from './shader/structs/materialStruct.glsl.js';
-
-export * from './utils/SobolNumberMapGenerator.js'
 
 
 // materials
